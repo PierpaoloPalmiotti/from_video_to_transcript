@@ -24,38 +24,114 @@ Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
 
 ---
 
-## 📋 Requisiti
+## 📋 Prerequisiti
 
-- **Python 3.8+**
-- **FFmpeg** installato e nel PATH di sistema
-- **RAM**: almeno 4 GB liberi per il modello `large-v3-turbo` (quantizzazione int8)
-- **GPU** (opzionale): NVIDIA con CUDA per trascrizioni più veloci
+### 1. Python 3.8 o superiore
 
-### Installare FFmpeg
+Verifica se Python è già installato aprendo un terminale:
 
-- **Windows**: scarica da [ffmpeg.org](https://ffmpeg.org/download.html) e aggiungi al PATH, oppure `winget install FFmpeg`
-- **macOS**: `brew install ffmpeg`
-- **Linux**: `sudo apt install ffmpeg`
+```bash
+python --version
+```
+
+Se non è installato:
+
+- **Windows**: scarica da [python.org/downloads](https://www.python.org/downloads/). Durante l'installazione **spunta "Add Python to PATH"**.
+- **macOS**: `brew install python` oppure scarica da [python.org](https://www.python.org/downloads/)
+- **Linux (Ubuntu/Debian)**: `sudo apt update && sudo apt install python3 python3-pip python3-venv`
+
+### 2. FFmpeg
+
+FFmpeg è necessario per estrarre e segmentare l'audio dai video. Verifica se è installato:
+
+```bash
+ffmpeg -version
+```
+
+Se non è installato:
+
+<details>
+<summary><b>🪟 Windows</b></summary>
+
+**Opzione A — winget (consigliata, Windows 10/11):**
+```bash
+winget install FFmpeg
+```
+Riavvia il terminale dopo l'installazione.
+
+**Opzione B — Installazione manuale:**
+1. Vai su [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) e scarica `ffmpeg-release-essentials.zip`
+2. Estrai lo ZIP in una cartella, es. `C:\ffmpeg`
+3. Aggiungi `C:\ffmpeg\bin` al PATH di sistema:
+   - Cerca "Variabili d'ambiente" nel menu Start
+   - Modifica la variabile `Path` → Aggiungi `C:\ffmpeg\bin`
+4. Riavvia il terminale e verifica con `ffmpeg -version`
+</details>
+
+<details>
+<summary><b>🍎 macOS</b></summary>
+
+```bash
+brew install ffmpeg
+```
+Se non hai Homebrew: [brew.sh](https://brew.sh/)
+</details>
+
+<details>
+<summary><b>🐧 Linux (Ubuntu/Debian)</b></summary>
+
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+</details>
+
+### 3. Git (per clonare il repository)
+
+```bash
+git --version
+```
+
+Se non è installato:
+- **Windows**: scarica da [git-scm.com](https://git-scm.com/)
+- **macOS**: `brew install git` oppure `xcode-select --install`
+- **Linux**: `sudo apt install git`
 
 ---
 
-## 🚀 Installazione
+## 🚀 Installazione del progetto
 
 ```bash
-# Clona il repository
-git clone https://github.com/TUO_USERNAME/audio-splitter-transcriber.git
-cd audio-splitter-transcriber
+# 1. Clona il repository
+git clone https://github.com/PierpaoloPalmiotti/from_video_to_transcript.git
+cd from_video_to_transcript
 
-# Crea un virtual environment (consigliato)
+# 2. Crea un virtual environment (consigliato)
 python -m venv venv
-source venv/bin/activate        # Linux/macOS
-venv\Scripts\activate           # Windows
 
-# Installa le dipendenze
+# 3. Attiva il virtual environment
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+
+# 4. Installa le dipendenze
 pip install -r requirements.txt
 ```
 
-> **Nota**: al primo avvio della trascrizione, il modello Whisper verrà scaricato automaticamente da Hugging Face (~1.5 GB per `large-v3-turbo`). Le esecuzioni successive saranno molto più veloci.
+### ⚠️ Nota sul primo avvio
+
+Al primo avvio della trascrizione, il modello Whisper scelto verrà **scaricato automaticamente** da Hugging Face. Le dimensioni variano in base al modello:
+
+| Modello | Download |
+|---|---|
+| `tiny` | ~75 MB |
+| `small` | ~460 MB |
+| `medium` | ~1.5 GB |
+| `large-v3-turbo` | ~1.6 GB |
+| `large-v3` | ~3 GB |
+
+Il download avviene una sola volta. Le esecuzioni successive useranno la cache locale.
 
 ---
 
@@ -124,15 +200,40 @@ cartella_video/
 
 ---
 
-## ⚡ Performance indicative
+## ⚡ Performance reali e proiezioni
 
-Con `large-v3-turbo` in quantizzazione `int8` su CPU:
+### Benchmark misurato
 
-| Hardware | 10 min di audio | 1 ora di audio |
+Dai test effettuati con `large-v3-turbo` in quantizzazione `int8` su CPU, il tempo end-to-end (splitting + trascrizione) è di circa:
+
+> **~20 sec/MB** di video sorgente
+
+Questo valore include il caricamento del modello, l'estrazione audio, la segmentazione e la trascrizione completa.
+
+### Proiezioni tempi E2E per dimensione video
+
+| Dimensione video | Tempo stimato E2E | Note |
 |---|---|---|
-| Laptop (i7 / Ryzen 7) | ~2.5-4 min | ~15-25 min |
-| Desktop (i9 / Ryzen 9) | ~1.5-2.5 min | ~10-15 min |
-| GPU (RTX 3060+) float16 | ~30-50 sec | ~3-5 min |
+| **50 MB** | ~17 min | Clip breve, video compresso |
+| **100 MB** | ~33 min | Video medio di qualche minuto |
+| **200 MB** | ~1h 7min | Registrazione ~15-30 min |
+| **500 MB** | ~2h 47min | Lezione / meeting ~1h |
+| **1 GB** | ~5h 41min | Conferenza lunga / webinar |
+| **2 GB** | ~11h 22min | Evento / registrazione estesa |
+| **5 GB** | ~28h 24min | Consigliato usare GPU |
+
+> ⚠️ I tempi sono indicativi e dipendono da CPU, RAM disponibile, e complessità dell'audio (più parlato = più lavoro per il modello). Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**, portando il totale a circa **3-5 sec/MB**.
+
+### Confronto CPU vs GPU
+
+| Setup | sec/MB | 200 MB | 1 GB |
+|---|---|---|---|
+| CPU (i7/Ryzen 7, int8) | ~20 | ~1h 7min | ~5h 41min |
+| CPU (i9/Ryzen 9, int8) | ~14 | ~47 min | ~4h |
+| GPU (RTX 3060, float16) | ~4 | ~13 min | ~1h 8min |
+| GPU (RTX 4090, float16) | ~2 | ~7 min | ~34 min |
+
+> 💡 **Consiglio**: per video superiori a 500 MB, una GPU dedicata fa una differenza enorme. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
 
 ---
 
@@ -147,6 +248,19 @@ Con `large-v3-turbo` in quantizzazione `int8` su CPU:
 | `large-v3` | ~4 GB | ⚡ | ⭐⭐⭐⭐⭐ |
 
 > **Consiglio**: usa `large-v3-turbo` come default. Scala a `medium` se la RAM non basta. Evita `tiny` e `base` per l'italiano.
+
+---
+
+## 🔧 Troubleshooting
+
+| Problema | Soluzione |
+|---|---|
+| `FFmpeg non trovato` | Verifica che `ffmpeg -version` funzioni nel terminale. Se no, reinstallalo e riavvia il terminale. |
+| `faster-whisper non installato` | Esegui `pip install faster-whisper` con il virtual environment attivo |
+| Trascrizione lenta | Prova un modello più piccolo (`medium`, `small`) oppure usa una GPU con `--device cuda` |
+| Il modello non si scarica | Verifica la connessione internet. La cache è in `~/.cache/huggingface/` |
+| Errore CUDA / GPU | Assicurati di avere i driver NVIDIA aggiornati e CUDA toolkit installato |
+| Allucinazioni nel testo | Il filtro VAD è attivo di default. Se persistono, prova `--lingua it` per forzare la lingua |
 
 ---
 
