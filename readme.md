@@ -1,4 +1,4 @@
-# 🎬 Audio Splitter & Transcriber
+# 🎬 From Video to Text - on your PC
 
 Applicazione desktop con interfaccia grafica moderna per **estrarre audio da video**, **segmentarlo** in parti di dimensione configurabile e **trascriverlo automaticamente** in locale usando modelli Whisper.
 
