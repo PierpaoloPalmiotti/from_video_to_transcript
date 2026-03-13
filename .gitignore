@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+*.spec
+.env
+venv/
+.venv/
+
+# Output audio/video (non tracciare file multimediali)
+*.wav
+*.mp3
+*.ogg
+*.opus
+*.m4a
+*.flac
+*.aac
+*.wma
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.flv
+*.webm
+
+# Trascrizioni generate
+trascrizione.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

@@ -1,0 +1,3 @@
+moviepy
+faster-whisper
+customtkinter
