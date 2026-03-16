@@ -1,8 +1,18 @@
 # 🎬 From Video to Text - on your PC
 
-Applicazione desktop con interfaccia grafica moderna per **estrarre audio da video**, **segmentarlo** in parti di dimensione configurabile e **trascriverlo automaticamente** in locale usando modelli Whisper.
+## Il problema
 
-Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
+Hai ore di registrazioni di chiamate, riunioni, lezioni da recuperare e sintetizzare — ma non hai il tempo di riascoltarle una per una.
+
+Non parliamo di video online come YouTube: per quelli esistono già decine di tool in grado di trascrivere e creare chatbot interrogabili sulle fonti (vedi [NotebookLM](https://notebooklm.google.com/)).
+
+Parliamo di **registrazioni video e audio in locale**, sul tuo device. File che restano nei tuoi hard disk, nei NAS aziendali, nelle cartelle condivise. Come trasformare GB di video in **testo ricercabile e utilizzabile** dai tuoi strumenti AI — aziendali e non?
+
+## La soluzione
+
+Ho creato un processo **interamente in locale**, open source, che estrae e trascrive il contenuto audio di qualsiasi registrazione video — senza inviare nulla al cloud, senza abbonamenti, senza limiti di utilizzo.
+
+Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -12,15 +22,11 @@ Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
 
 ## ✨ Funzionalità
 
-- **Estrazione audio** da qualsiasi formato video (MP4, AVI, MKV, MOV, ecc.)
-- **Segmentazione** dell'audio in parti con dimensione massima configurabile (in MB)
-- **Trascrizione locale** con [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — nessun dato inviato al cloud
-- **Modello consigliato**: `large-v3-turbo` — veloce e accurato su italiano/inglese
-- **Filtro VAD** integrato per evitare allucinazioni durante i silenzi
-- **Due formati di output**: testo semplice o dettagliato con timestamp
-- **Report completo** con tempi di splitting, trascrizione e metriche sec/MB
-- **Interfaccia moderna** con CustomTkinter (tema dark/light)
-- **Modalità standalone**: lo script `transcriber.py` funziona anche da riga di comando
+- **Estrazione + segmentazione audio** da qualsiasi formato video (MP4, AVI, MKV, MOV, ecc.) con dimensione segmenti configurabile
+- **Trascrizione locale** con [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — modello consigliato `large-v3-turbo`, accurato su italiano e inglese
+- **Filtro VAD** integrato contro le allucinazioni nei silenzi
+- **Output flessibile**: testo semplice o dettagliato con timestamp, con report completo delle metriche
+- **Interfaccia moderna** con CustomTkinter (dark/light) + modalità CLI standalone (`transcriber.py`)
 
 ---
 
@@ -224,16 +230,21 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 
 > ⚠️ I tempi sono indicativi e dipendono da CPU, RAM disponibile, e complessità dell'audio (più parlato = più lavoro per il modello). Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**, portando il totale a circa **3-5 sec/MB**.
 
-### Confronto CPU vs GPU
+### Confronto CPU vs GPU vs Apple Silicon
 
 | Setup | sec/MB | 200 MB | 1 GB |
 |---|---|---|---|
 | CPU (i7/Ryzen 7, int8) | ~20 | ~1h 7min | ~5h 41min |
 | CPU (i9/Ryzen 9, int8) | ~14 | ~47 min | ~4h |
+| MacBook Air M2/M3 (int8) | ~16 | ~53 min | ~4h 33min |
+| MacBook Pro M2 Pro/M3 Pro (int8) | ~12 | ~40 min | ~3h 25min |
+| MacBook Pro M3 Max/M4 Pro (int8) | ~9 | ~30 min | ~2h 34min |
 | GPU (RTX 3060, float16) | ~4 | ~13 min | ~1h 8min |
 | GPU (RTX 4090, float16) | ~2 | ~7 min | ~34 min |
 
-> 💡 **Consiglio**: per video superiori a 500 MB, una GPU dedicata fa una differenza enorme. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
+> 💡 **Nota su macOS**: faster-whisper su Apple Silicon gira su CPU (non sfrutta Metal/GPU nativamente), ma le performance dei chip M-series sono eccellenti grazie alla bandwidth di memoria unificata e all'efficienza dei core. Un MacBook Pro M3 Pro si colloca a metà tra un i9 desktop e una RTX 3060. Per sfruttare appieno la GPU Apple, valuta alternative come [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) che supportano l'accelerazione Metal nativa.
+
+> 💡 **Consiglio**: per video superiori a 500 MB, una GPU dedicata (o un Mac con chip Pro/Max) fa una differenza enorme. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
 
 ---
 
