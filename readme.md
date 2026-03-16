@@ -2,17 +2,11 @@
 
 ## Il problema
 
-Hai ore di registrazioni di chiamate, riunioni, lezioni da recuperare e sintetizzare — ma non hai il tempo di riascoltarle una per una.
-
-Non parliamo di video online come YouTube: per quelli esistono già tantissimi tool in grado di trascrivere e creare chatbot interrogabili sulle fonti.
-
-Parliamo di **registrazioni video e audio in locale**, sul tuo device. File che restano nei tuoi hard disk, nei NAS aziendali, nelle cartelle condivise. Come trasformare GB di video in **testo ricercabile e utilizzabile** dai tuoi strumenti AI — aziendali e non?
+Ore di registrazioni di chiamate, riunioni, lezioni da recuperare — ma zero tempo per riascoltarle. Per i video online come YouTube esistono già tool come [NotebookLM](https://notebooklm.google.com/). Ma per le **registrazioni locali** — quelle sui tuoi hard disk, NAS aziendali, cartelle condivise — come trasformare GB di video in **testo utilizzabile** dai tuoi strumenti AI?
 
 ## La soluzione
 
-Ho creato un processo **interamente in locale**, open source, che estrae e trascrive il contenuto audio di qualsiasi registrazione video — senza inviare nulla al cloud, senza abbonamenti, senza limiti di utilizzo.
-
-Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
+Questa applicazione **estrae, segmenta e trascrive** l'audio di qualsiasi video, interamente in locale, senza cloud, senza abbonamenti. Lanci il processo, continui a lavorare, e quando hai finito trovi il testo pronto.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -137,7 +131,19 @@ Al primo avvio della trascrizione, il modello Whisper scelto verrà **scaricato 
 | `large-v3-turbo` | ~1.6 GB |
 | `large-v3` | ~3 GB |
 
-Il download avviene una sola volta. Le esecuzioni successive useranno la cache locale.
+Il download avviene una sola volta — **la connessione internet è necessaria solo per questo passaggio**. Tutte le esecuzioni successive funzionano completamente offline.
+
+Se preferisci scaricare il modello in anticipo (ad esempio quando hai una buona connessione), puoi farlo da terminale:
+
+```bash
+# Pre-download del modello consigliato
+huggingface-cli download Systran/faster-whisper-large-v3-turbo
+
+# Oppure di un altro modello
+huggingface-cli download Systran/faster-whisper-medium
+```
+
+In questo modo avrai tutto pronto per lavorare offline quando serve.
 
 ---
 
