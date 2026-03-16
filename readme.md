@@ -153,6 +153,7 @@ In questo modo avrai tutto pronto per lavorare offline quando serve.
 
 ---
 ## 📂 Struttura del progetto
+Una volta configurato il tutto, la folder deve essere così
 
 ```
 from_video_to_transcript/
