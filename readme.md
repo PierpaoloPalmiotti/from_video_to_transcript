@@ -152,6 +152,42 @@ huggingface-cli download Systran/faster-whisper-medium
 In questo modo avrai tutto pronto per lavorare offline quando serve.
 
 ---
+## 📂 Struttura del progetto
+
+```
+from_video_to_transcript/
+│
+├── main.py                  # Applicazione GUI (CustomTkinter)
+├── transcriber.py           # Modulo CLI standalone per trascrizione
+├── requirements.txt         # Dipendenze Python
+├── README.md                # Documentazione
+├── LICENSE                  # Licenza MIT
+├── .gitignore               # File e cartelle esclusi da Git
+│
+├── ffmpeg.exe               # ⚠️ Solo Windows, opzionale (vedi nota sotto)
+│
+└── venv/                    # Virtual environment (generato, non versionato)
+```
+
+> ⚠️ **ffmpeg.exe**: su Windows puoi copiare `ffmpeg.exe` direttamente nella cartella del progetto come alternativa all'installazione globale nel PATH. Su macOS e Linux, FFmpeg va installato a livello di sistema (vedi [Prerequisiti](#-prerequisiti)). Il file è escluso dal repository tramite `.gitignore`.
+
+> 💡 **venv/** e i modelli Whisper (salvati in `~/.cache/huggingface/`) non sono inclusi nel repository. Vengono generati localmente durante l'installazione e il primo avvio.
+
+### Output generato a runtime
+
+Quando elabori un video, l'applicazione crea una cartella dedicata accanto al file sorgente:
+
+```
+cartella_video/
+├── intervista.mp4
+└── intervista/                          # Cartella output (nome = nome video)
+    ├── intervista_segmento_1.wav
+    ├── intervista_segmento_2.wav
+    ├── intervista_segmento_3.wav
+    └── trascrizione.txt
+```
+
+---
 
 ## 💻 Utilizzo
 
