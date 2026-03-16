@@ -228,19 +228,34 @@ Dai test effettuati con `large-v3-turbo` in quantizzazione `int8` su CPU, il tem
 
 Questo valore include il caricamento del modello, l'estrazione audio, la segmentazione e la trascrizione completa.
 
-### Proiezioni tempi E2E per dimensione video
+### Rapporti di velocità stimati per modello (CPU, int8)
 
-| Dimensione video | Tempo stimato E2E | Note |
+| Modello | sec/MB stimati | Rapporto vs turbo |
 |---|---|---|
-| **50 MB** | ~17 min | Clip breve, video compresso |
-| **100 MB** | ~33 min | Video medio di qualche minuto |
-| **200 MB** | ~1h 7min | Registrazione ~15-30 min |
-| **500 MB** | ~2h 47min | Lezione / meeting ~1h |
-| **1 GB** | ~5h 41min | Conferenza lunga / webinar |
-| **2 GB** | ~11h 22min | Evento / registrazione estesa |
-| **5 GB** | ~28h 24min | Consigliato usare GPU |
+| `tiny` | ~3 | ~7x più veloce |
+| `small` | ~7 | ~3x più veloce |
+| `medium` | ~14 | ~1.4x più veloce |
+| `large-v3-turbo` | **~20** | **baseline (misurato)** |
+| `large-v3` | ~50 | ~2.5x più lento |
 
-> ⚠️ I tempi sono indicativi e dipendono da CPU, RAM disponibile, e complessità dell'audio (più parlato = più lavoro per il modello). Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**, portando il totale a circa **3-5 sec/MB**.
+### Proiezioni tempi E2E per dimensione video e modello
+
+| Dimensione video | `tiny` (~3 s/MB) | `small` (~7 s/MB) | `medium` (~14 s/MB) | `large-v3-turbo` (~20 s/MB) ⭐ | `large-v3` (~50 s/MB) |
+|---|---|---|---|---|---|
+| **50 MB** | ~2 min | ~6 min | ~12 min | **~17 min** | ~42 min |
+| **100 MB** | ~5 min | ~12 min | ~23 min | **~33 min** | ~1h 23min |
+| **200 MB** | ~10 min | ~23 min | ~47 min | **~1h 7min** | ~2h 47min |
+| **500 MB** | ~25 min | ~58 min | ~1h 57min | **~2h 47min** | ~6h 57min |
+| **1 GB** | ~51 min | ~2h | ~3h 59min | **~5h 41min** | ~14h 13min |
+| **2 GB** | ~1h 42min | ~3h 59min | ~7h 57min | **~11h 22min** | ~28h 26min |
+| **5 GB** | ~4h 16min | ~9h 58min | ~19h 53min | **~28h 24min** | ~71h (≈3 giorni) |
+
+> ⭐ La colonna `large-v3-turbo` è basata su benchmark reali. Le altre sono **proiezioni stimate** in base ai rapporti di velocità tipici tra modelli su CPU int8. I tempi effettivi possono variare in base a CPU, RAM e complessità dell'audio.
+
+> ⚠️ **Nota qualità**: `tiny` e `small` sono molto più veloci ma la qualità in italiano degrada significativamente. `medium` è un buon compromesso se la RAM è limitata. `large-v3` offre qualità identica al turbo ma impiega 2.5x più tempo — **il turbo resta la scelta migliore** in quasi tutti gli scenari.
+
+> 💡 **Consiglio**: per video superiori a 500 MB con `large-v3-turbo` o `large-v3`, una GPU dedicata (o un Mac con chip Pro/Max) fa una differenza enorme. Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
+
 
 ### Confronto CPU vs GPU vs Apple Silicon
 
