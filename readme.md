@@ -1,12 +1,20 @@
 # 🎬 From Video to Text - on your PC
 
+# 🎬 From Video to Text - on your PC
+
 ## Il problema
 
-Ore di registrazioni di chiamate, riunioni, lezioni da recuperare — ma zero tempo per riascoltarle. Per i video online come YouTube esistono già tool come [NotebookLM](https://notebooklm.google.com/). Ma per le **registrazioni locali** — quelle sui tuoi hard disk, NAS aziendali, cartelle condivise — come trasformare GB di video in **testo utilizzabile** dai tuoi strumenti AI?
+Hai ore di registrazioni di chiamate, riunioni, lezioni da recuperare e sintetizzare — ma non hai il tempo di riascoltarle una per una.
+
+Non parliamo di video online come YouTube: per quelli esistono già tantissimi tool in grado di trascrivere e creare chatbot interrogabili sulle fonti.
+
+Parliamo di **registrazioni video e audio in locale**, sul tuo device. File che restano nei tuoi hard disk, nei NAS aziendali, nelle cartelle condivise. Come trasformare GB di video in **testo ricercabile e utilizzabile** dai tuoi strumenti AI — aziendali e non?
 
 ## La soluzione
 
-Questa applicazione **estrae, segmenta e trascrive** l'audio di qualsiasi video, interamente in locale, senza cloud, senza abbonamenti. Lanci il processo, continui a lavorare, e quando hai finito trovi il testo pronto.
+Ho creato un processo **interamente in locale**, open source, che estrae e trascrive il contenuto audio di qualsiasi registrazione video — senza inviare nulla al cloud, senza abbonamenti, senza limiti di utilizzo.
+
+Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
