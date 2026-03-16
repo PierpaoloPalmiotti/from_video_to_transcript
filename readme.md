@@ -1,7 +1,5 @@
 # 🎬 From Video to Text - on your PC
 
-# 🎬 From Video to Text - on your PC
-
 ## Il problema
 
 Hai ore di registrazioni di chiamate, riunioni, lezioni da recuperare e sintetizzare — ma non hai il tempo di riascoltarle una per una.
