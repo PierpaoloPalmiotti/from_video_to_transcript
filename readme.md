@@ -4,7 +4,7 @@
 
 Hai ore di registrazioni di chiamate, riunioni, lezioni da recuperare e sintetizzare — ma non hai il tempo di riascoltarle una per una.
 
-Non parliamo di video online come YouTube: per quelli esistono già decine di tool in grado di trascrivere e creare chatbot interrogabili sulle fonti (vedi [NotebookLM](https://notebooklm.google.com/)).
+Non parliamo di video online come YouTube: per quelli esistono già tantissimi tool in grado di trascrivere e creare chatbot interrogabili sulle fonti.
 
 Parliamo di **registrazioni video e audio in locale**, sul tuo device. File che restano nei tuoi hard disk, nei NAS aziendali, nelle cartelle condivise. Come trasformare GB di video in **testo ricercabile e utilizzabile** dai tuoi strumenti AI — aziendali e non?
 
