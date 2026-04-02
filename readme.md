@@ -1,3 +1,5 @@
+![Audio Splitter & Transcriber](from_video_to_text.png)
+
 # 🎬 From Video to Text - on your PC
 
 ## Il problema
@@ -24,6 +26,10 @@ Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, 
 
 - **Estrazione + segmentazione audio** da qualsiasi formato video (MP4, AVI, MKV, MOV, ecc.) con dimensione segmenti configurabile
 - **Trascrizione locale** con [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — modello consigliato `large-v3-turbo`, accurato su italiano e inglese
+- **Pipeline one-click**: un unico pulsante esegue splitting + trascrizione in sequenza senza intervento manuale
+- **Pulizia automatica**: i file audio segmentati vengono eliminati al termine della trascrizione completata con successo
+- **Checkpoint/resume**: il progresso viene salvato in `_progresso.json` dopo ogni segmento — se il processo viene interrotto, alla ripresa parte dal punto in cui si era fermato
+- **Pausa e Stop durante l'esecuzione**: pulsanti ⏸ e ⏹ accessibili dal log; allo stop viene generato comunque il file di trascrizione parziale con quanto elaborato fino a quel momento
 - **Filtro VAD** integrato contro le allucinazioni nei silenzi
 - **Output flessibile**: testo semplice o dettagliato con timestamp, con report completo delle metriche
 - **Interfaccia moderna** con CustomTkinter (dark/light) + modalità CLI standalone (`transcriber.py`)
@@ -149,11 +155,9 @@ huggingface-cli download Systran/faster-whisper-large-v3-turbo
 huggingface-cli download Systran/faster-whisper-medium
 ```
 
-In questo modo avrai tutto pronto per lavorare offline quando serve.
-
 ---
+
 ## 📂 Struttura del progetto
-Una volta configurato il tutto, la folder deve essere così
 
 ```
 from_video_to_transcript/
@@ -181,12 +185,15 @@ Quando elabori un video, l'applicazione crea una cartella dedicata accanto al fi
 ```
 cartella_video/
 ├── intervista.mp4
-└── intervista/                          # Cartella output (nome = nome video)
-    ├── intervista_segmento_1.wav
-    ├── intervista_segmento_2.wav
-    ├── intervista_segmento_3.wav
-    └── trascrizione.txt
+└── intervista/                               # Cartella output (nome = nome video)
+    ├── intervista_segmento_1.wav             # Eliminati automaticamente dopo
+    ├── intervista_segmento_2.wav             # la trascrizione completata
+    ├── intervista_segmento_3.wav             #
+    ├── intervista_trascrizione.txt           # Output finale
+    └── _progresso.json                       # Checkpoint (rimosso a completamento)
 ```
+
+> 💡 I file audio segmentati vengono **eliminati automaticamente** al termine di una trascrizione completata con successo. In caso di interruzione, i file restano e `_progresso.json` tiene traccia di quanto già trascritto per permettere la ripresa.
 
 ---
 
@@ -200,8 +207,13 @@ python main.py
 
 1. Clicca **📁 Sfoglia** e seleziona un video
 2. Imposta la dimensione massima per segmento (in MB)
-3. Clicca **▶ Elabora Video** — i segmenti verranno salvati in una cartella con il nome del video
-4. Clicca **🎙 Trascrivi Segmenti** — la trascrizione verrà salvata nella stessa cartella
+3. Scegli una delle due modalità:
+   - **▶ Elabora Video** — esegue solo lo splitting audio
+   - **⚡ Elabora + Trascrivi** — esegue splitting e trascrizione in sequenza con un solo click
+4. Se hai usato solo **Elabora Video**, clicca **🎙 Trascrivi Segmenti** per avviare la trascrizione manualmente
+5. La trascrizione viene salvata come `{nome_video}_trascrizione.txt` nella cartella del video
+
+Durante splitting e trascrizione compaiono i pulsanti **⏸ Pausa** e **⏹ Stop** nel pannello log. Allo stop viene generato comunque il file di trascrizione con quanto elaborato fino a quel momento — potrai riprendere in seguito dallo stesso punto.
 
 Puoi anche usare **📂 Trascrivi da Cartella...** per trascrivere file audio già esistenti senza passare dallo splitting.
 
@@ -243,14 +255,10 @@ Ogni video genera una cartella dedicata con il proprio nome:
 cartella_video/
 ├── intervista.mp4
 ├── intervista/
-│   ├── intervista_segmento_1.wav
-│   ├── intervista_segmento_2.wav
-│   ├── intervista_segmento_3.wav
-│   └── trascrizione.txt
+│   └── intervista_trascrizione.txt
 ├── riunione.mp4
 └── riunione/
-    ├── riunione_segmento_1.wav
-    └── trascrizione.txt
+    └── riunione_trascrizione.txt
 ```
 
 ---
@@ -293,7 +301,6 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 
 > 💡 **Consiglio**: per video superiori a 500 MB con `large-v3-turbo` o `large-v3`, una GPU dedicata (o un Mac con chip Pro/Max) fa una differenza enorme. Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
 
-
 ### Confronto CPU vs GPU vs Apple Silicon
 
 | Setup | sec/MB | 200 MB | 1 GB |
@@ -307,8 +314,6 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 | GPU (RTX 4090, float16) | ~2 | ~7 min | ~34 min |
 
 > 💡 **Nota su macOS**: faster-whisper su Apple Silicon gira su CPU (non sfrutta Metal/GPU nativamente), ma le performance dei chip M-series sono eccellenti grazie alla bandwidth di memoria unificata e all'efficienza dei core. Un MacBook Pro M3 Pro si colloca a metà tra un i9 desktop e una RTX 3060. Per sfruttare appieno la GPU Apple, valuta alternative come [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) che supportano l'accelerazione Metal nativa.
-
-> 💡 **Consiglio**: per video superiori a 500 MB, una GPU dedicata (o un Mac con chip Pro/Max) fa una differenza enorme. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
 
 ---
 
@@ -336,6 +341,7 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 | Il modello non si scarica | Verifica la connessione internet. La cache è in `~/.cache/huggingface/` |
 | Errore CUDA / GPU | Assicurati di avere i driver NVIDIA aggiornati e CUDA toolkit installato |
 | Allucinazioni nel testo | Il filtro VAD è attivo di default. Se persistono, prova `--lingua it` per forzare la lingua |
+| La trascrizione non riprende dal punto giusto | Verifica che `_progresso.json` sia presente nella cartella dei segmenti. Se corrotto, eliminalo per ripartire da zero |
 
 ---
 
