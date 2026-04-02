@@ -5,6 +5,7 @@ import sys
 import re
 import math
 import time
+import json
 import warnings
 import subprocess
 import tempfile
@@ -43,6 +44,10 @@ COLORE_GRIGIO = "#4a4a4a"
 COLORE_SFONDO_LOG = "#1a1a2e"
 COLORE_TESTO_LOG = "#e0e0e0"
 COLORE_TESTO_DIM = "#888888"
+COLORE_ARANCIO = "#d4781f"
+COLORE_GIALLO = "#b8860b"
+
+PROGRESSO_FILE = "_progresso.json"
 
 
 # ===========================================================================
@@ -91,7 +96,7 @@ def get_file_size_mb(file_path):
 
 
 def split_audio_with_ffmpeg(input_path, output_dir, target_size_mb, base_name,
-                            callback=None):
+                            callback=None, stop_event=None):
     ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
         raise Exception("FFmpeg non trovato")
@@ -122,6 +127,11 @@ def split_audio_with_ffmpeg(input_path, output_dir, target_size_mb, base_name,
 
     segments_created = []
     for i in range(num_segments):
+        if stop_event and stop_event.is_set():
+            if callback:
+                callback(f"\n⏹  Splitting interrotto dall'utente al segmento {i+1}/{num_segments}")
+            break
+
         start_time = i * segment_duration
         if start_time >= total_seconds:
             break
@@ -166,8 +176,67 @@ def trova_file_audio(cartella):
     return file_audio
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint: salvataggio / caricamento progresso
+# ---------------------------------------------------------------------------
+
+def _carica_progresso(cartella):
+    path = os.path.join(cartella, PROGRESSO_FILE)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data
+        except Exception:
+            pass
+    return {"completati": [], "risultati": [], "risultati_dettaglio": [], "durata_totale": 0.0}
+
+
+def _salva_progresso(cartella, progresso):
+    path = os.path.join(cartella, PROGRESSO_FILE)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(progresso, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _rimuovi_progresso(cartella):
+    path = os.path.join(cartella, PROGRESSO_FILE)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _nome_output(cartella):
+    nome_cartella = os.path.basename(os.path.normpath(cartella))
+    return f"{nome_cartella}_trascrizione.txt"
+
+
+def _scrivi_file_trascrizione(cartella, risultati, risultati_dettaglio,
+                               durata_totale, formato, tempo_trascrizione=0):
+    """Scrive/sovrascrive il file di trascrizione con tutti i risultati disponibili."""
+    if formato == "dettagliato":
+        output = _formatta_dettagliato(risultati_dettaglio, durata_totale, tempo_trascrizione)
+    else:
+        output = "\n\n".join(r for r in risultati if r)
+
+    nome_file_out = _nome_output(cartella)
+    percorso_output = os.path.join(cartella, nome_file_out)
+    with open(percorso_output, "w", encoding="utf-8") as f:
+        f.write(output)
+    return percorso_output
+
+
+# ---------------------------------------------------------------------------
+# Trascrizione con checkpoint + stop/pausa + file parziale
+# ---------------------------------------------------------------------------
+
 def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
-                       device="auto", formato="txt", callback=None):
+                       device="auto", formato="txt", callback=None,
+                       stop_event=None, pause_event=None):
     if not WHISPER_DISPONIBILE:
         raise ImportError("faster-whisper non installato.\nInstalla con: pip install faster-whisper")
 
@@ -196,18 +265,64 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
             callback("⚠ Nessun file audio trovato.")
         return "", 0.0
 
-    if callback:
-        callback(f"📂 Trovati {len(file_audio)} file audio\n")
+    # Carica progresso precedente
+    progresso = _carica_progresso(cartella)
+    completati = set(progresso.get("completati", []))
+    risultati = list(progresso.get("risultati", []))
+    risultati_dettaglio = list(progresso.get("risultati_dettaglio", []))
+    durata_totale = progresso.get("durata_totale", 0.0)
 
-    risultati = []
-    risultati_dettaglio = []
-    durata_totale = 0.0
-    t_inizio = time.time()
+    file_da_fare = [f for f in file_audio if f not in completati]
+    n_gia_fatti = len(file_audio) - len(file_da_fare)
 
-    for i, nome_file in enumerate(file_audio, 1):
-        percorso = os.path.join(cartella, nome_file)
+    if n_gia_fatti > 0 and callback:
+        callback(f"🔄 Ripresa: {n_gia_fatti}/{len(file_audio)} segmenti gia' trascritti, "
+                 f"riprendo da segmento {n_gia_fatti + 1}\n")
+
+    if not file_da_fare:
         if callback:
-            callback(f"[{i}/{len(file_audio)}] {nome_file}...")
+            callback("✅ Tutti i segmenti sono gia' stati trascritti.")
+        percorso_output = _finalizza_trascrizione(
+            cartella, risultati, risultati_dettaglio,
+            durata_totale, file_audio, formato, 0, callback)
+        return percorso_output, 0.0
+
+    if callback:
+        callback(f"📂 Trovati {len(file_audio)} file audio totali, "
+                 f"{len(file_da_fare)} da trascrivere\n")
+
+    t_inizio = time.time()
+    interrotto = False
+
+    for i, nome_file in enumerate(file_da_fare, 1):
+        # --- Check STOP ---
+        if stop_event and stop_event.is_set():
+            interrotto = True
+            if callback:
+                callback(f"\n⏹  Trascrizione interrotta dall'utente dopo "
+                         f"{n_gia_fatti + i - 1}/{len(file_audio)} segmenti")
+            break
+
+        # --- Check PAUSA ---
+        if pause_event and pause_event.is_set():
+            if callback:
+                callback(f"⏸  In pausa... (clicca ▶ Riprendi per continuare)")
+            while pause_event.is_set():
+                if stop_event and stop_event.is_set():
+                    interrotto = True
+                    break
+                time.sleep(0.3)
+            if interrotto:
+                if callback:
+                    callback(f"\n⏹  Trascrizione interrotta durante la pausa")
+                break
+            if callback:
+                callback(f"▶  Ripresa trascrizione...")
+
+        percorso = os.path.join(cartella, nome_file)
+        indice_globale = n_gia_fatti + i
+        if callback:
+            callback(f"[{indice_globale}/{len(file_audio)}] {nome_file}...")
 
         try:
             segmenti_gen, info = model.transcribe(
@@ -232,6 +347,16 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
                 "durata": info.duration, "testo": testo_unito,
                 "segmenti": segmenti_lista,
             })
+            completati.add(nome_file)
+
+            # Salva checkpoint dopo ogni segmento
+            _salva_progresso(cartella, {
+                "completati": list(completati),
+                "risultati": risultati,
+                "risultati_dettaglio": risultati_dettaglio,
+                "durata_totale": durata_totale,
+            })
+
             stato = "✓" if testo_unito else "— silenzio"
             if callback:
                 callback(f"  {stato} | {info.language} | {info.duration:.1f}s")
@@ -242,14 +367,40 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
 
     tempo_trascrizione = time.time() - t_inizio
 
-    if formato == "dettagliato":
-        output = _formatta_dettagliato(risultati_dettaglio, durata_totale, tempo_trascrizione)
-    else:
-        output = "\n\n".join(r for r in risultati if r)
+    if interrotto:
+        # Genera file di trascrizione parziale
+        percorso_parziale = _scrivi_file_trascrizione(
+            cartella, risultati, risultati_dettaglio,
+            durata_totale, formato, tempo_trascrizione)
 
-    percorso_output = os.path.join(cartella, "trascrizione.txt")
-    with open(percorso_output, "w", encoding="utf-8") as f:
-        f.write(output)
+        n_completati = len(completati)
+        if callback:
+            callback(f"\n{'─'*50}")
+            callback(f"💾 PROGRESSO SALVATO + FILE PARZIALE")
+            callback(f"{'─'*50}")
+            callback(f"   Segmenti completati:  {n_completati}/{len(file_audio)}")
+            callback(f"   Rimanenti:            {len(file_audio) - n_completati}")
+            callback(f"   File parziale:        {percorso_parziale}")
+            callback(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
+            callback(f"   (alla ripresa il file verra' aggiornato con i nuovi segmenti)")
+        return "", tempo_trascrizione
+
+    # Trascrizione completata al 100%
+    percorso_output = _finalizza_trascrizione(
+        cartella, risultati, risultati_dettaglio,
+        durata_totale, file_audio, formato, tempo_trascrizione, callback)
+
+    return percorso_output, tempo_trascrizione
+
+
+def _finalizza_trascrizione(cartella, risultati, risultati_dettaglio,
+                            durata_totale, file_audio, formato,
+                            tempo_trascrizione, callback):
+    """Scrive il file finale, pulisce audio e rimuove il checkpoint."""
+
+    percorso_output = _scrivi_file_trascrizione(
+        cartella, risultati, risultati_dettaglio,
+        durata_totale, formato, tempo_trascrizione)
 
     n_ok = sum(1 for r in risultati if r)
     if callback:
@@ -263,7 +414,25 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
             callback(f"   Velocita':            {durata_totale/tempo_trascrizione:.1f}x tempo reale")
         callback(f"   Salvato in:           {percorso_output}")
 
-    return percorso_output, tempo_trascrizione
+    # Pulizia segmenti audio (solo se completato al 100%)
+    if n_ok > 0:
+        file_rimossi = 0
+        for nome_file in file_audio:
+            try:
+                percorso_file = os.path.join(cartella, nome_file)
+                if os.path.exists(percorso_file):
+                    os.remove(percorso_file)
+                    file_rimossi += 1
+            except Exception as e:
+                if callback:
+                    callback(f"  ⚠ Impossibile eliminare {nome_file}: {e}")
+        if callback:
+            callback(f"\n🗑  Pulizia: {file_rimossi}/{len(file_audio)} file audio eliminati")
+
+    # Rimuovi checkpoint
+    _rimuovi_progresso(cartella)
+
+    return percorso_output
 
 
 def _formatta_dettagliato(risultati, durata_totale, tempo_elab):
@@ -315,14 +484,18 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("Audio Splitter & Transcriber")
-        self.geometry("700x780")
-        self.minsize(650, 700)
+        self.geometry("700x820")
+        self.minsize(650, 740)
 
         self.cartella_segmenti = None
         self.in_esecuzione = False
         self.video_size_mb = 0.0
         self.tempo_splitting = 0.0
         self.tempo_trascrizione = 0.0
+
+        # Eventi per stop e pausa
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
 
         # Grid principale: la riga del log si espande
         self.grid_columnconfigure(0, weight=1)
@@ -346,7 +519,6 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(side="left")
 
-        # Toggle tema
         self.tema_var = ctk.StringVar(value="dark")
         ctk.CTkSegmentedButton(
             header, values=["☀️ Light", "🌙 Dark"],
@@ -367,14 +539,12 @@ class App(ctk.CTk):
         frame.grid(row=1, column=0, padx=20, pady=(5, 5), sticky="ew")
         frame.grid_columnconfigure(0, weight=1)
 
-        # Titolo sezione
         ctk.CTkLabel(
             frame, text="1 │ Estrazione & Segmentazione",
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, columnspan=3, padx=15, pady=(12, 8), sticky="w")
 
-        # Riga file
         ctk.CTkLabel(frame, text="Video:", anchor="w").grid(
             row=1, column=0, padx=(15, 5), pady=4, sticky="w")
 
@@ -391,7 +561,6 @@ class App(ctk.CTk):
             fg_color=COLORE_GRIGIO, hover_color="#5a5a5a",
         ).grid(row=1, column=2, padx=(5, 15), pady=4)
 
-        # Riga dimensione + pulsante
         row_split = ctk.CTkFrame(frame, fg_color="transparent")
         row_split.grid(row=2, column=0, columnspan=3, padx=15, pady=(4, 12),
                        sticky="ew")
@@ -407,6 +576,14 @@ class App(ctk.CTk):
             row_split, text="(es. 25 = ~25 MB)",
             text_color=COLORE_TESTO_DIM, font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(0, 15))
+
+        self.btn_elabora_e_trascrivi = ctk.CTkButton(
+            row_split, text="⚡ Elabora + Trascrivi",
+            command=self._process_video_e_trascrivi,
+            fg_color=COLORE_ARANCIO, hover_color="#b5651d",
+            font=ctk.CTkFont(size=13, weight="bold"), height=36,
+        )
+        self.btn_elabora_e_trascrivi.pack(side="right", padx=(5, 0))
 
         self.btn_elabora = ctk.CTkButton(
             row_split, text="▶  Elabora Video",
@@ -429,7 +606,6 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"), anchor="w",
         ).grid(row=0, column=0, columnspan=4, padx=15, pady=(12, 8), sticky="w")
 
-        # Riga 1: Modello + Lingua
         ctk.CTkLabel(frame, text="Modello:").grid(
             row=1, column=0, padx=(15, 5), pady=4, sticky="w")
         self.modello_var = ctk.StringVar(value="large-v3-turbo")
@@ -445,7 +621,6 @@ class App(ctk.CTk):
             values=["Auto-detect", "it (Italiano)", "en (English)"],
         ).grid(row=1, column=3, padx=(5, 15), pady=4, sticky="w")
 
-        # Riga 2: Formato + Device
         ctk.CTkLabel(frame, text="Formato:").grid(
             row=2, column=0, padx=(15, 5), pady=4, sticky="w")
         self.formato_var = ctk.StringVar(value="txt")
@@ -462,7 +637,6 @@ class App(ctk.CTk):
             width=160,
         ).grid(row=2, column=3, padx=(5, 15), pady=4, sticky="w")
 
-        # Riga 3: Pulsanti
         row_btns = ctk.CTkFrame(frame, fg_color="transparent")
         row_btns.grid(row=3, column=0, columnspan=4, padx=15, pady=(8, 12),
                       sticky="ew")
@@ -483,10 +657,10 @@ class App(ctk.CTk):
         )
         self.btn_trascrivi_cartella.pack(side="left")
 
-        # Avviso se manca faster-whisper
         if not WHISPER_DISPONIBILE:
             self.btn_trascrivi.configure(state="disabled")
             self.btn_trascrivi_cartella.configure(state="disabled")
+            self.btn_elabora_e_trascrivi.configure(state="disabled")
             ctk.CTkLabel(
                 frame,
                 text="⚠  faster-whisper non installato — pip install faster-whisper",
@@ -494,15 +668,14 @@ class App(ctk.CTk):
             ).grid(row=4, column=0, columnspan=4, padx=15, pady=(0, 8), sticky="w")
 
     # -------------------------------------------------------------------
-    # Sezione 3: Log + Progress
+    # Sezione 3: Log + Progress + Controlli Pausa/Stop
     # -------------------------------------------------------------------
     def _crea_sezione_log(self):
         frame = ctk.CTkFrame(self)
         frame.grid(row=4, column=0, padx=20, pady=5, sticky="nsew")
-        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_rowconfigure(2, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        # Riga titolo + progress bar
         top_row = ctk.CTkFrame(frame, fg_color="transparent")
         top_row.grid(row=0, column=0, padx=15, pady=(10, 5), sticky="ew")
         top_row.grid_columnconfigure(1, weight=1)
@@ -512,18 +685,35 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
 
-        self.progress = ctk.CTkProgressBar(top_row, height=6)
-        self.progress.grid(row=0, column=1, padx=(15, 0), sticky="ew")
+        # Pulsanti Pausa e Stop
+        self.ctrl_frame = ctk.CTkFrame(top_row, fg_color="transparent")
+        self.ctrl_frame.grid(row=0, column=1, sticky="e")
+
+        self.btn_pausa = ctk.CTkButton(
+            self.ctrl_frame, text="⏸ Pausa", width=90,
+            command=self._toggle_pausa,
+            fg_color=COLORE_GIALLO, hover_color="#9a7209",
+            font=ctk.CTkFont(size=12, weight="bold"), height=30,
+        )
+
+        self.btn_stop = ctk.CTkButton(
+            self.ctrl_frame, text="⏹ Stop", width=90,
+            command=self._richiedi_stop,
+            fg_color=COLORE_ROSSO, hover_color="#a93226",
+            font=ctk.CTkFont(size=12, weight="bold"), height=30,
+        )
+
+        self.progress = ctk.CTkProgressBar(frame, height=6)
+        self.progress.grid(row=1, column=0, padx=15, pady=(0, 5), sticky="ew")
         self.progress.set(0)
 
-        # Textbox log
         self.log_text = ctk.CTkTextbox(
             frame, font=ctk.CTkFont(family="Consolas", size=12),
             activate_scrollbars=True, wrap="word",
             fg_color=COLORE_SFONDO_LOG, text_color=COLORE_TESTO_LOG,
             corner_radius=8,
         )
-        self.log_text.grid(row=1, column=0, padx=15, pady=(0, 12), sticky="nsew")
+        self.log_text.grid(row=2, column=0, padx=15, pady=(0, 12), sticky="nsew")
 
     # -------------------------------------------------------------------
     # Status bar
@@ -549,7 +739,6 @@ class App(ctk.CTk):
         self.after(0, lambda: self.status_label.configure(text=f"  {msg}"))
 
     def _set_progress(self, valore):
-        """valore da 0.0 a 1.0, oppure -1 per indeterminato."""
         def _update():
             if valore < 0:
                 self.progress.configure(mode="indeterminate")
@@ -560,18 +749,57 @@ class App(ctk.CTk):
                 self.progress.set(valore)
         self.after(0, _update)
 
+    def _mostra_controlli(self):
+        self.btn_pausa.pack(side="left", padx=(0, 5))
+        self.btn_stop.pack(side="left")
+
+    def _nascondi_controlli(self):
+        self.btn_pausa.pack_forget()
+        self.btn_stop.pack_forget()
+
+    def _toggle_pausa(self):
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.btn_pausa.configure(text="⏸ Pausa", fg_color=COLORE_GIALLO,
+                                     hover_color="#9a7209")
+            self._set_status("Ripresa in corso...")
+        else:
+            self.pause_event.set()
+            self.btn_pausa.configure(text="▶ Riprendi", fg_color=COLORE_VERDE,
+                                     hover_color="#1e6b43")
+            self._set_status("In pausa")
+
+    def _richiedi_stop(self):
+        if messagebox.askyesno("Conferma Stop",
+                "Vuoi interrompere l'esecuzione?\n\n"
+                "Il progresso e la trascrizione parziale\n"
+                "verranno salvati. Potrai riprendere\n"
+                "in un secondo momento."):
+            self.stop_event.set()
+            self.pause_event.clear()
+            self._set_status("Interruzione in corso...")
+            self._log("⏹  Stop richiesto, attendo completamento segmento corrente...")
+
     def _set_in_esecuzione(self, stato):
         def _update():
             self.in_esecuzione = stato
             s = "disabled" if stato else "normal"
             self.btn_elabora.configure(state=s)
+            self.btn_elabora_e_trascrivi.configure(
+                state=s if WHISPER_DISPONIBILE else "disabled")
             wh_s = s if WHISPER_DISPONIBILE else "disabled"
             self.btn_trascrivi.configure(state=wh_s)
             self.btn_trascrivi_cartella.configure(state=wh_s)
             if stato:
                 self._set_progress(-1)
+                self.stop_event.clear()
+                self.pause_event.clear()
+                self.btn_pausa.configure(text="⏸ Pausa", fg_color=COLORE_GIALLO,
+                                         hover_color="#9a7209")
+                self._mostra_controlli()
             else:
                 self._set_progress(0)
+                self._nascondi_controlli()
         self.after(0, _update)
 
     def _stampa_report_e2e(self):
@@ -626,6 +854,17 @@ class App(ctk.CTk):
             return None
 
     def _process_video(self):
+        self._avvia_elaborazione_video(auto_trascrivi=False)
+
+    def _process_video_e_trascrivi(self):
+        if not WHISPER_DISPONIBILE:
+            messagebox.showerror("Errore",
+                "faster-whisper non installato.\n"
+                "Installa con: pip install faster-whisper")
+            return
+        self._avvia_elaborazione_video(auto_trascrivi=True)
+
+    def _avvia_elaborazione_video(self, auto_trascrivi=False):
         if self.in_esecuzione:
             return
         if not setup_moviepy():
@@ -645,11 +884,22 @@ class App(ctk.CTk):
 
         self.video_size_mb = get_file_size_mb(video_path)
         self._set_in_esecuzione(True)
+
+        modalita = "ELABORAZIONE + TRASCRIZIONE" if auto_trascrivi else "ELABORAZIONE VIDEO"
         self._log(f"\n{'━'*50}")
-        self._log(f"🎬  ELABORAZIONE VIDEO")
+        self._log(f"🎬  {modalita}")
         self._log(f"{'━'*50}")
         self._log(f"   File: {os.path.basename(video_path)}")
-        self._log(f"   Dimensione: {self.video_size_mb:.1f} MB\n")
+        self._log(f"   Dimensione: {self.video_size_mb:.1f} MB")
+        if auto_trascrivi:
+            self._log(f"   Modalita': one-click (split → trascrivi)\n")
+        else:
+            self._log("")
+
+        lingua = self._get_lingua()
+        modello = self.modello_var.get()
+        formato = self.formato_var.get()
+        device = self.device_var.get()
 
         def lavoro():
             try:
@@ -684,6 +934,16 @@ class App(ctk.CTk):
                 except Exception:
                     audio.write_audiofile(temp_audio_path)
 
+                if self.stop_event.is_set():
+                    audio.close()
+                    video.close()
+                    try:
+                        os.unlink(temp_audio_path)
+                    except:
+                        pass
+                    self._log("⏹  Interrotto dopo estrazione audio")
+                    return
+
                 self._set_status("Segmentazione audio...")
                 self._log("⏳ Segmentazione audio...\n")
 
@@ -692,7 +952,7 @@ class App(ctk.CTk):
 
                 segments, seg_dur_min = split_audio_with_ffmpeg(
                     temp_audio_path, output_dir, target_size_mb, base_name,
-                    callback=self._log)
+                    callback=self._log, stop_event=self.stop_event)
 
                 audio.close()
                 video.close()
@@ -703,9 +963,12 @@ class App(ctk.CTk):
 
                 self.tempo_splitting = time.time() - t_split_start
 
+                if self.stop_event.is_set() and not segments:
+                    self._set_status("Interrotto")
+                    return
+
                 if segments:
                     self.cartella_segmenti = output_dir
-                    self._set_status("Splitting completato!")
                     self._log(f"\n{'─'*50}")
                     self._log(f"📊  REPORT SPLITTING")
                     self._log(f"{'─'*50}")
@@ -713,15 +976,55 @@ class App(ctk.CTk):
                     self._log(f"   Durata media:      ~{seg_dur_min:.1f} min/segmento")
                     self._log(f"   Tempo splitting:   {formatta_tempo(self.tempo_splitting)}")
                     self._log(f"   Cartella:          {output_dir}")
-                    self._log(f"\n✅ Puoi ora cliccare 'Trascrivi Segmenti'")
-                    self.after(0, lambda: messagebox.showinfo("Successo",
-                        f"{len(segments)} segmenti creati\n"
-                        f"Tempo: {formatta_tempo(self.tempo_splitting)}\n"
-                        f"Percorso: {output_dir}"))
+
+                    if auto_trascrivi and not self.stop_event.is_set():
+                        self._log(f"\n{'━'*50}")
+                        self._log(f"🎙  TRASCRIZIONE AUTOMATICA")
+                        self._log(f"{'━'*50}")
+                        self._log(f"   Cartella: {output_dir}\n")
+                        self._set_status("Trascrizione in corso...")
+
+                        percorso_out, tempo_trasc = trascrivi_segmenti(
+                            cartella=output_dir, modello_nome=modello,
+                            lingua=lingua, device=device, formato=formato,
+                            callback=self._log,
+                            stop_event=self.stop_event,
+                            pause_event=self.pause_event)
+
+                        self.tempo_trascrizione = tempo_trasc
+
+                        if percorso_out:
+                            self._set_status("Elaborazione + Trascrizione completata!")
+                            self._stampa_report_e2e()
+                            self.after(0, lambda: messagebox.showinfo("Completato",
+                                f"Processo end-to-end completato!\n\n"
+                                f"Segmenti: {len(segments)}\n"
+                                f"Trascrizione: {percorso_out}\n"
+                                f"Tempo totale: {formatta_tempo(self.tempo_splitting + self.tempo_trascrizione)}"))
+                        else:
+                            if self.stop_event.is_set():
+                                self._set_status("Interrotto — progresso e file parziale salvati")
+                            else:
+                                self._set_status("Splitting OK, nessun file trascritto")
+                    elif self.stop_event.is_set():
+                        self._set_status("Interrotto dopo splitting")
+                        self._log(f"\n✅ Splitting completato. Trascrizione non avviata (interrotto).")
+                        self._log(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
+                    else:
+                        self._set_status("Splitting completato!")
+                        self._log(f"\n✅ Puoi ora cliccare 'Trascrivi Segmenti'")
+                        self.after(0, lambda: messagebox.showinfo("Successo",
+                            f"{len(segments)} segmenti creati\n"
+                            f"Tempo: {formatta_tempo(self.tempo_splitting)}\n"
+                            f"Percorso: {output_dir}"))
                 else:
                     self._set_status("Errore splitting")
                     self.after(0, lambda: messagebox.showerror("Errore",
                         "Nessun segmento creato."))
+            except ImportError as e:
+                self._set_status("Errore trascrizione")
+                self._log(f"\n✗ ERRORE: {e}")
+                self.after(0, lambda: messagebox.showerror("Errore", str(e)))
             except Exception as e:
                 self._set_status("Errore")
                 err = str(e)
@@ -781,7 +1084,9 @@ class App(ctk.CTk):
                 percorso_out, tempo_trasc = trascrivi_segmenti(
                     cartella=cartella, modello_nome=modello,
                     lingua=lingua, device=device, formato=formato,
-                    callback=self._log)
+                    callback=self._log,
+                    stop_event=self.stop_event,
+                    pause_event=self.pause_event)
 
                 self.tempo_trascrizione = tempo_trasc
 
@@ -792,7 +1097,10 @@ class App(ctk.CTk):
                     self.after(0, lambda: messagebox.showinfo("Completato",
                         f"Trascrizione salvata in:\n{percorso_out}"))
                 else:
-                    self._set_status("Nessun file trascritto")
+                    if self.stop_event.is_set():
+                        self._set_status("Interrotto — progresso e file parziale salvati")
+                    else:
+                        self._set_status("Nessun file trascritto")
             except Exception as e:
                 self._set_status("Errore trascrizione")
                 self._log(f"\n✗ ERRORE: {e}")
