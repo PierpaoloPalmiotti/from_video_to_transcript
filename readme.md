@@ -14,11 +14,12 @@ Parliamo di **registrazioni video e audio in locale**, sul tuo device. File che 
 
 Ho creato un processo **interamente in locale**, open source, che estrae e trascrive il contenuto audio di qualsiasi registrazione video — senza inviare nulla al cloud, senza abbonamenti, senza limiti di utilizzo.
 
-Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua.
+Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua. Funziona su **CPU** o **GPU NVIDIA** (con accelerazione CUDA), con fallback automatico su CPU se CUDA non è disponibile.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76B900?logo=nvidia&logoColor=white)
 
 ---
 
@@ -26,7 +27,10 @@ Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, 
 
 - **Estrazione + segmentazione audio** da qualsiasi formato video (MP4, AVI, MKV, MOV, ecc.) con dimensione segmenti configurabile
 - **Trascrizione locale** con [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — modello consigliato `large-v3-turbo`, accurato su italiano e inglese
+- **Accelerazione GPU NVIDIA** opzionale: rilevamento automatico delle DLL CUDA installate via pip (cuBLAS, cuDNN); selezione `cuda`, `cpu` o `auto` direttamente dalla GUI
+- **Fallback automatico CUDA → CPU** se la GPU non è disponibile o le librerie CUDA non sono caricabili — l'app non si blocca, segnala l'errore nel log e prosegue su CPU
 - **Pipeline one-click**: un unico pulsante esegue splitting + trascrizione in sequenza senza intervento manuale
+- **Cleanup deterministico delle risorse GPU** a fine trascrizione (svuotamento esplicito della cache CUDA): l'app resta aperta dopo il completamento e ti permette di consultare con calma le metriche finali
 - **Pulizia automatica**: i file audio segmentati vengono eliminati al termine della trascrizione completata con successo
 - **Checkpoint/resume**: il progresso viene salvato in `_progresso.json` dopo ogni segmento — se il processo viene interrotto, alla ripresa parte dal punto in cui si era fermato
 - **Pausa e Stop durante l'esecuzione**: pulsanti ⏸ e ⏹ accessibili dal log; allo stop viene generato comunque il file di trascrizione parziale con quanto elaborato fino a quel momento
@@ -113,6 +117,8 @@ Se non è installato:
 
 ## 🚀 Installazione del progetto
 
+### Installazione base (CPU)
+
 ```bash
 # 1. Clona il repository
 git clone https://github.com/PierpaoloPalmiotti/from_video_to_transcript.git
@@ -127,9 +133,21 @@ venv\Scripts\activate
 # macOS/Linux:
 source venv/bin/activate
 
-# 4. Installa le dipendenze
+# 4. Installa le dipendenze base
 pip install -r requirements.txt
 ```
+
+### Installazione opzionale per GPU NVIDIA
+
+Se hai una GPU NVIDIA e vuoi sfruttare l'accelerazione CUDA (5-8x più veloce della CPU su modelli grandi), installa anche le librerie cuBLAS e cuDNN. Sono pacchetti pesanti (~700 MB), quindi alza il timeout di pip:
+
+```bash
+pip install --timeout 300 -r requirements-gpu.txt
+```
+
+> 💡 Non serve installare manualmente CUDA Toolkit o NVIDIA Driver Pack: i pacchetti `nvidia-cublas-cu12` e `nvidia-cudnn-cu12` contengono le DLL già pronte. L'app le rileva automaticamente e le aggiunge al `PATH` al primo avvio.
+>
+> ⚠️ **Driver NVIDIA**: assicurati comunque di avere i driver NVIDIA aggiornati installati a livello di sistema (i pacchetti pip portano solo le librerie utente, non il driver kernel-mode).
 
 ### ⚠️ Nota sul primo avvio
 
@@ -164,7 +182,8 @@ from_video_to_transcript/
 │
 ├── main.py                  # Applicazione GUI (CustomTkinter)
 ├── transcriber.py           # Modulo CLI standalone per trascrizione
-├── requirements.txt         # Dipendenze Python
+├── requirements.txt         # Dipendenze base (CPU)
+├── requirements-gpu.txt     # Dipendenze opzionali per GPU NVIDIA
 ├── README.md                # Documentazione
 ├── LICENSE                  # Licenza MIT
 ├── .gitignore               # File e cartelle esclusi da Git
@@ -211,9 +230,21 @@ python main.py
    - **▶ Elabora Video** — esegue solo lo splitting audio
    - **⚡ Elabora + Trascrivi** — esegue splitting e trascrizione in sequenza con un solo click
 4. Se hai usato solo **Elabora Video**, clicca **🎙 Trascrivi Segmenti** per avviare la trascrizione manualmente
-5. La trascrizione viene salvata come `{nome_video}_trascrizione.txt` nella cartella del video
+5. Imposta **Device** su `auto` (default), `cpu` o `cuda` in base alla tua macchina
+6. La trascrizione viene salvata come `{nome_video}_trascrizione.txt` nella cartella del video
 
 Durante splitting e trascrizione compaiono i pulsanti **⏸ Pausa** e **⏹ Stop** nel pannello log. Allo stop viene generato comunque il file di trascrizione con quanto elaborato fino a quel momento — potrai riprendere in seguito dallo stesso punto.
+
+A fine trascrizione vedrai nel log:
+
+```
+🧹 Risorse modello liberate
+📋 REPORT FINALE END-TO-END
+   ...
+🟢 App pronta — puoi consultare i log o avviare un'altra trascrizione.
+```
+
+Il messaggio finale conferma che la cache GPU è stata svuotata correttamente e che l'app è pronta per un nuovo lavoro.
 
 Puoi anche usare **📂 Trascrivi da Cartella...** per trascrivere file audio già esistenti senza passare dallo splitting.
 
@@ -225,6 +256,9 @@ python transcriber.py /percorso/cartella_audio/
 
 # Forza italiano e formato dettagliato con timestamp
 python transcriber.py /percorso/cartella_audio/ --lingua it --formato dettagliato
+
+# Usa la GPU
+python transcriber.py /percorso/cartella_audio/ --device cuda
 
 # Usa un modello più leggero se la RAM scarseggia
 python transcriber.py /percorso/cartella_audio/ --modello medium
@@ -319,15 +353,15 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 
 ## 🛠 Scelta del modello
 
-| Modello | RAM (int8) | Velocità | Qualità IT/EN |
-|---|---|---|---|
-| `tiny` | ~0.5 GB | ⚡⚡⚡⚡⚡ | ⭐⭐ |
-| `small` | ~1 GB | ⚡⚡⚡⚡ | ⭐⭐⭐ |
-| `medium` | ~2 GB | ⚡⚡⚡ | ⭐⭐⭐⭐ |
-| `large-v3-turbo` | ~2.5 GB | ⚡⚡⚡ | ⭐⭐⭐⭐⭐ |
-| `large-v3` | ~4 GB | ⚡ | ⭐⭐⭐⭐⭐ |
+| Modello | RAM (int8) | VRAM (float16) | Velocità | Qualità IT/EN |
+|---|---|---|---|---|
+| `tiny` | ~0.5 GB | ~1 GB | ⚡⚡⚡⚡⚡ | ⭐⭐ |
+| `small` | ~1 GB | ~2 GB | ⚡⚡⚡⚡ | ⭐⭐⭐ |
+| `medium` | ~2 GB | ~4 GB | ⚡⚡⚡ | ⭐⭐⭐⭐ |
+| `large-v3-turbo` | ~2.5 GB | ~5 GB | ⚡⚡⚡ | ⭐⭐⭐⭐⭐ |
+| `large-v3` | ~4 GB | ~8 GB | ⚡ | ⭐⭐⭐⭐⭐ |
 
-> **Consiglio**: usa `large-v3-turbo` come default. Scala a `medium` se la RAM non basta. Evita `tiny` e `base` per l'italiano.
+> **Consiglio**: usa `large-v3-turbo` come default. Scala a `medium` se la RAM/VRAM non basta. Evita `tiny` e `base` per l'italiano.
 
 ---
 
@@ -337,9 +371,13 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 |---|---|
 | `FFmpeg non trovato` | Verifica che `ffmpeg -version` funzioni nel terminale. Se no, reinstallalo e riavvia il terminale. |
 | `faster-whisper non installato` | Esegui `pip install faster-whisper` con il virtual environment attivo |
-| Trascrizione lenta | Prova un modello più piccolo (`medium`, `small`) oppure usa una GPU con `--device cuda` |
+| Trascrizione lenta su CPU | Prova un modello più piccolo (`medium`, `small`) oppure passa a GPU con `--device cuda` (vedi sotto) |
 | Il modello non si scarica | Verifica la connessione internet. La cache è in `~/.cache/huggingface/` |
-| Errore CUDA / GPU | Assicurati di avere i driver NVIDIA aggiornati e CUDA toolkit installato |
+| `Could not load library cudnn_ops_infer64_8.dll` o `cublas64_12.dll` non trovata | Installa le librerie GPU: `pip install --timeout 300 -r requirements-gpu.txt`. L'app rileva automaticamente i percorsi DLL e li aggiunge al PATH. |
+| `CUDA out of memory` o errori CUDA generici | Scegli un modello più piccolo (es. `medium` invece di `large-v3-turbo`). Se la VRAM è scarsa (<5 GB), passa a `cpu`. L'app fa comunque **fallback automatico su CPU** se CUDA fallisce al caricamento del modello. |
+| Driver NVIDIA mancanti | Anche con i pacchetti pip installati, serve il driver NVIDIA a livello di sistema. Aggiornalo da [nvidia.com/Download](https://www.nvidia.com/Download/index.aspx). |
+| Pip si blocca su `nvidia-cublas-cu12` (timeout) | Sono pacchetti grandi (~500 MB ciascuno). Alza il timeout: `pip install --timeout 300 -r requirements-gpu.txt` |
+| L'app si chiudeva dopo la trascrizione GPU | Risolto: ora c'è un cleanup deterministico della cache CUDA prima del messagebox finale, l'app resta aperta. |
 | Allucinazioni nel testo | Il filtro VAD è attivo di default. Se persistono, prova `--lingua it` per forzare la lingua |
 | La trascrizione non riprende dal punto giusto | Verifica che `_progresso.json` sia presente nella cartella dei segmenti. Se corrotto, eliminalo per ripartire da zero |
 

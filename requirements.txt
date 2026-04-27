@@ -1,3 +1,21 @@
-moviepy
-faster-whisper
-customtkinter
+# =====================================================================
+# Dipendenze base - From Video to Text (CPU)
+# =====================================================================
+# Per l'accelerazione GPU NVIDIA, installare anche requirements-gpu.txt:
+#   pip install --timeout 300 -r requirements-gpu.txt
+# =====================================================================
+
+# GUI
+customtkinter>=5.2.0
+
+# Estrazione audio da video
+moviepy>=1.0.3
+
+# Trascrizione (motore CTranslate2)
+faster-whisper>=1.0.0
+
+# Per il rilevamento automatico CUDA (auto-detect device)
+# Su sistemi senza GPU questo pacchetto resta utile per il check `torch.cuda.is_available()`
+# che ritorna False senza errori. Se vuoi un'installazione minimale CPU-only senza torch,
+# puoi commentare questa riga: l'app userà comunque CPU come default.
+torch>=2.0.0

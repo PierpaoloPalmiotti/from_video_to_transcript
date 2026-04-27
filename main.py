@@ -3,6 +3,7 @@ from tkinter import messagebox, filedialog
 import os
 import sys
 import re
+import gc
 import math
 import time
 import json
@@ -19,6 +20,43 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+# ---------------------------------------------------------------------------
+# Registra i percorsi DLL NVIDIA installati via pip (cublas, cudnn, ecc.)
+# ---------------------------------------------------------------------------
+def _registra_nvidia_dll():
+    """Aggiunge al PATH di sistema le cartelle lib/bin dei pacchetti nvidia-*
+    installati via pip, così CTranslate2 può trovare cublas64_12.dll ecc."""
+    try:
+        import importlib.metadata
+        nvidia_packages = [
+            d.metadata["Name"] for d in importlib.metadata.distributions()
+            if (d.metadata["Name"] or "").startswith("nvidia-")
+        ]
+        for pkg in nvidia_packages:
+            try:
+                files = importlib.metadata.files(pkg)
+                if not files:
+                    continue
+                pkg_dir = str(files[0].locate().parent)
+                # Risali alla radice del pacchetto
+                for subdir in ("lib", "bin"):
+                    candidate = os.path.join(pkg_dir, subdir)
+                    if os.path.isdir(candidate) and candidate not in os.environ.get("PATH", ""):
+                        os.environ["PATH"] = candidate + os.pathsep + os.environ.get("PATH", "")
+                # Prova anche le sottocartelle che contengono DLL
+                for root, dirs, fnames in os.walk(pkg_dir):
+                    for fname in fnames:
+                        if fname.lower().endswith(".dll"):
+                            if root not in os.environ.get("PATH", ""):
+                                os.environ["PATH"] = root + os.pathsep + os.environ.get("PATH", "")
+                            break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+_registra_nvidia_dll()
 
 # ---------------------------------------------------------------------------
 # Check opzionale faster-whisper
@@ -48,6 +86,37 @@ COLORE_ARANCIO = "#d4781f"
 COLORE_GIALLO = "#b8860b"
 
 PROGRESSO_FILE = "_progresso.json"
+
+
+# ===========================================================================
+# Utility cleanup CUDA — evita crash a fine trascrizione
+# ===========================================================================
+def _libera_risorse_cuda(model_ref, dev, callback=None):
+    """Libera esplicitamente il modello Whisper e svuota la cache CUDA.
+
+    Senza questo passo, il GC di Python può liberare il modello in modo
+    non deterministico (anche dopo che la GUI ha mostrato il messagebox),
+    causando un crash silenzioso del processo su alcune configurazioni CUDA.
+    """
+    try:
+        if model_ref is not None:
+            del model_ref
+    except Exception:
+        pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if dev == "cuda":
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+    if callback:
+        callback("🧹 Risorse modello liberate")
 
 
 # ===========================================================================
@@ -254,143 +323,163 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
         callback(f"⏳ Caricamento modello '{modello_nome}' su {dev} ({compute})...")
 
     t0 = time.time()
-    model = WhisperModel(modello_nome, device=dev, compute_type=compute)
-    dt = time.time() - t0
-    if callback:
-        callback(f"✓ Modello caricato in {dt:.1f}s\n")
-
-    file_audio = trova_file_audio(cartella)
-    if not file_audio:
+    model = None
+    try:
+        try:
+            model = WhisperModel(modello_nome, device=dev, compute_type=compute)
+        except Exception as e:
+            if dev == "cuda":
+                if callback:
+                    callback(f"⚠ CUDA non disponibile ({e})")
+                    callback(f"⏳ Fallback automatico su CPU (int8)...")
+                dev = "cpu"
+                compute = "int8"
+                model = WhisperModel(modello_nome, device=dev, compute_type=compute)
+            else:
+                raise
+        dt = time.time() - t0
         if callback:
-            callback("⚠ Nessun file audio trovato.")
-        return "", 0.0
+            callback(f"✓ Modello caricato in {dt:.1f}s (device={dev})\n")
 
-    # Carica progresso precedente
-    progresso = _carica_progresso(cartella)
-    completati = set(progresso.get("completati", []))
-    risultati = list(progresso.get("risultati", []))
-    risultati_dettaglio = list(progresso.get("risultati_dettaglio", []))
-    durata_totale = progresso.get("durata_totale", 0.0)
+        file_audio = trova_file_audio(cartella)
+        if not file_audio:
+            if callback:
+                callback("⚠ Nessun file audio trovato.")
+            return "", 0.0
 
-    file_da_fare = [f for f in file_audio if f not in completati]
-    n_gia_fatti = len(file_audio) - len(file_da_fare)
+        # Carica progresso precedente
+        progresso = _carica_progresso(cartella)
+        completati = set(progresso.get("completati", []))
+        risultati = list(progresso.get("risultati", []))
+        risultati_dettaglio = list(progresso.get("risultati_dettaglio", []))
+        durata_totale = progresso.get("durata_totale", 0.0)
 
-    if n_gia_fatti > 0 and callback:
-        callback(f"🔄 Ripresa: {n_gia_fatti}/{len(file_audio)} segmenti gia' trascritti, "
-                 f"riprendo da segmento {n_gia_fatti + 1}\n")
+        file_da_fare = [f for f in file_audio if f not in completati]
+        n_gia_fatti = len(file_audio) - len(file_da_fare)
 
-    if not file_da_fare:
+        if n_gia_fatti > 0 and callback:
+            callback(f"🔄 Ripresa: {n_gia_fatti}/{len(file_audio)} segmenti gia' trascritti, "
+                     f"riprendo da segmento {n_gia_fatti + 1}\n")
+
+        if not file_da_fare:
+            if callback:
+                callback("✅ Tutti i segmenti sono gia' stati trascritti.")
+            percorso_output = _finalizza_trascrizione(
+                cartella, risultati, risultati_dettaglio,
+                durata_totale, file_audio, formato, 0, callback)
+            return percorso_output, 0.0
+
         if callback:
-            callback("✅ Tutti i segmenti sono gia' stati trascritti.")
+            callback(f"📂 Trovati {len(file_audio)} file audio totali, "
+                     f"{len(file_da_fare)} da trascrivere\n")
+
+        t_inizio = time.time()
+        interrotto = False
+
+        for i, nome_file in enumerate(file_da_fare, 1):
+            # --- Check STOP ---
+            if stop_event and stop_event.is_set():
+                interrotto = True
+                if callback:
+                    callback(f"\n⏹  Trascrizione interrotta dall'utente dopo "
+                             f"{n_gia_fatti + i - 1}/{len(file_audio)} segmenti")
+                break
+
+            # --- Check PAUSA ---
+            if pause_event and pause_event.is_set():
+                if callback:
+                    callback(f"⏸  In pausa... (clicca ▶ Riprendi per continuare)")
+                while pause_event.is_set():
+                    if stop_event and stop_event.is_set():
+                        interrotto = True
+                        break
+                    time.sleep(0.3)
+                if interrotto:
+                    if callback:
+                        callback(f"\n⏹  Trascrizione interrotta durante la pausa")
+                    break
+                if callback:
+                    callback(f"▶  Ripresa trascrizione...")
+
+            percorso = os.path.join(cartella, nome_file)
+            indice_globale = n_gia_fatti + i
+            if callback:
+                callback(f"[{indice_globale}/{len(file_audio)}] {nome_file}...")
+
+            try:
+                segmenti_gen, info = model.transcribe(
+                    percorso, language=lingua, beam_size=5,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+                    condition_on_previous_text=True, no_speech_threshold=0.6,
+                )
+                segmenti_lista = []
+                testi = []
+                for seg in segmenti_gen:
+                    t = seg.text.strip()
+                    if t:
+                        segmenti_lista.append({"inizio": seg.start, "fine": seg.end, "testo": t})
+                        testi.append(t)
+
+                testo_unito = " ".join(testi)
+                durata_totale += info.duration
+                risultati.append(testo_unito)
+                risultati_dettaglio.append({
+                    "file": nome_file, "lingua": info.language,
+                    "durata": info.duration, "testo": testo_unito,
+                    "segmenti": segmenti_lista,
+                })
+                completati.add(nome_file)
+
+                # Salva checkpoint dopo ogni segmento
+                _salva_progresso(cartella, {
+                    "completati": list(completati),
+                    "risultati": risultati,
+                    "risultati_dettaglio": risultati_dettaglio,
+                    "durata_totale": durata_totale,
+                })
+
+                stato = "✓" if testo_unito else "— silenzio"
+                if callback:
+                    callback(f"  {stato} | {info.language} | {info.duration:.1f}s")
+            except Exception as e:
+                risultati.append("")
+                if callback:
+                    callback(f"  ✗ ERRORE: {e}")
+
+        tempo_trascrizione = time.time() - t_inizio
+
+        if interrotto:
+            # Genera file di trascrizione parziale
+            percorso_parziale = _scrivi_file_trascrizione(
+                cartella, risultati, risultati_dettaglio,
+                durata_totale, formato, tempo_trascrizione)
+
+            n_completati = len(completati)
+            if callback:
+                callback(f"\n{'─'*50}")
+                callback(f"💾 PROGRESSO SALVATO + FILE PARZIALE")
+                callback(f"{'─'*50}")
+                callback(f"   Segmenti completati:  {n_completati}/{len(file_audio)}")
+                callback(f"   Rimanenti:            {len(file_audio) - n_completati}")
+                callback(f"   File parziale:        {percorso_parziale}")
+                callback(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
+                callback(f"   (alla ripresa il file verra' aggiornato con i nuovi segmenti)")
+            return "", tempo_trascrizione
+
+        # Trascrizione completata al 100%
         percorso_output = _finalizza_trascrizione(
             cartella, risultati, risultati_dettaglio,
-            durata_totale, file_audio, formato, 0, callback)
-        return percorso_output, 0.0
+            durata_totale, file_audio, formato, tempo_trascrizione, callback)
 
-    if callback:
-        callback(f"📂 Trovati {len(file_audio)} file audio totali, "
-                 f"{len(file_da_fare)} da trascrivere\n")
+        return percorso_output, tempo_trascrizione
 
-    t_inizio = time.time()
-    interrotto = False
-
-    for i, nome_file in enumerate(file_da_fare, 1):
-        # --- Check STOP ---
-        if stop_event and stop_event.is_set():
-            interrotto = True
-            if callback:
-                callback(f"\n⏹  Trascrizione interrotta dall'utente dopo "
-                         f"{n_gia_fatti + i - 1}/{len(file_audio)} segmenti")
-            break
-
-        # --- Check PAUSA ---
-        if pause_event and pause_event.is_set():
-            if callback:
-                callback(f"⏸  In pausa... (clicca ▶ Riprendi per continuare)")
-            while pause_event.is_set():
-                if stop_event and stop_event.is_set():
-                    interrotto = True
-                    break
-                time.sleep(0.3)
-            if interrotto:
-                if callback:
-                    callback(f"\n⏹  Trascrizione interrotta durante la pausa")
-                break
-            if callback:
-                callback(f"▶  Ripresa trascrizione...")
-
-        percorso = os.path.join(cartella, nome_file)
-        indice_globale = n_gia_fatti + i
-        if callback:
-            callback(f"[{indice_globale}/{len(file_audio)}] {nome_file}...")
-
-        try:
-            segmenti_gen, info = model.transcribe(
-                percorso, language=lingua, beam_size=5,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
-                condition_on_previous_text=True, no_speech_threshold=0.6,
-            )
-            segmenti_lista = []
-            testi = []
-            for seg in segmenti_gen:
-                t = seg.text.strip()
-                if t:
-                    segmenti_lista.append({"inizio": seg.start, "fine": seg.end, "testo": t})
-                    testi.append(t)
-
-            testo_unito = " ".join(testi)
-            durata_totale += info.duration
-            risultati.append(testo_unito)
-            risultati_dettaglio.append({
-                "file": nome_file, "lingua": info.language,
-                "durata": info.duration, "testo": testo_unito,
-                "segmenti": segmenti_lista,
-            })
-            completati.add(nome_file)
-
-            # Salva checkpoint dopo ogni segmento
-            _salva_progresso(cartella, {
-                "completati": list(completati),
-                "risultati": risultati,
-                "risultati_dettaglio": risultati_dettaglio,
-                "durata_totale": durata_totale,
-            })
-
-            stato = "✓" if testo_unito else "— silenzio"
-            if callback:
-                callback(f"  {stato} | {info.language} | {info.duration:.1f}s")
-        except Exception as e:
-            risultati.append("")
-            if callback:
-                callback(f"  ✗ ERRORE: {e}")
-
-    tempo_trascrizione = time.time() - t_inizio
-
-    if interrotto:
-        # Genera file di trascrizione parziale
-        percorso_parziale = _scrivi_file_trascrizione(
-            cartella, risultati, risultati_dettaglio,
-            durata_totale, formato, tempo_trascrizione)
-
-        n_completati = len(completati)
-        if callback:
-            callback(f"\n{'─'*50}")
-            callback(f"💾 PROGRESSO SALVATO + FILE PARZIALE")
-            callback(f"{'─'*50}")
-            callback(f"   Segmenti completati:  {n_completati}/{len(file_audio)}")
-            callback(f"   Rimanenti:            {len(file_audio) - n_completati}")
-            callback(f"   File parziale:        {percorso_parziale}")
-            callback(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
-            callback(f"   (alla ripresa il file verra' aggiornato con i nuovi segmenti)")
-        return "", tempo_trascrizione
-
-    # Trascrizione completata al 100%
-    percorso_output = _finalizza_trascrizione(
-        cartella, risultati, risultati_dettaglio,
-        durata_totale, file_audio, formato, tempo_trascrizione, callback)
-
-    return percorso_output, tempo_trascrizione
+    finally:
+        # IMPORTANTE: libera esplicitamente il modello e la cache CUDA
+        # PRIMA che la funzione ritorni e la GUI mostri il messagebox.
+        # Senza questo, il GC può liberare il modello CUDA in un momento
+        # arbitrario causando crash che chiudono l'app dopo la fine.
+        _libera_risorse_cuda(model, dev, callback=callback)
 
 
 def _finalizza_trascrizione(cartella, risultati, risultati_dettaglio,
@@ -996,6 +1085,7 @@ class App(ctk.CTk):
                         if percorso_out:
                             self._set_status("Elaborazione + Trascrizione completata!")
                             self._stampa_report_e2e()
+                            self._log("\n🟢 App pronta — puoi consultare i log o avviare un'altra trascrizione.")
                             self.after(0, lambda: messagebox.showinfo("Completato",
                                 f"Processo end-to-end completato!\n\n"
                                 f"Segmenti: {len(segments)}\n"
@@ -1094,6 +1184,7 @@ class App(ctk.CTk):
                     self._set_status("Trascrizione completata!")
                     if self.tempo_splitting > 0 and self.video_size_mb > 0:
                         self._stampa_report_e2e()
+                    self._log("\n🟢 App pronta — puoi consultare i log o avviare un'altra trascrizione.")
                     self.after(0, lambda: messagebox.showinfo("Completato",
                         f"Trascrizione salvata in:\n{percorso_out}"))
                 else:
