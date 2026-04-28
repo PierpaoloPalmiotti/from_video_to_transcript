@@ -87,6 +87,39 @@ COLORE_GIALLO = "#b8860b"
 
 PROGRESSO_FILE = "_progresso.json"
 
+# ---------------------------------------------------------------------------
+# Logging su file: configurazione
+# ---------------------------------------------------------------------------
+LOG_DIR_NAME = "logs"
+
+
+def _get_log_dir():
+    """Restituisce la cartella dei log, creandola se non esiste.
+    Si posiziona accanto allo script (o all'eseguibile PyInstaller)."""
+    try:
+        if getattr(sys, 'frozen', False):
+            # Eseguibile PyInstaller
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base = os.path.abspath(".")
+    log_dir = os.path.join(base, LOG_DIR_NAME)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        pass
+    return log_dir
+
+
+def _sanitize_filename(name, max_len=80):
+    """Sostituisce caratteri non validi nei nomi file e tronca se troppo lungo."""
+    if not name:
+        return ""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    name = name.strip().strip('.').replace(' ', '_')
+    return name[:max_len] if len(name) > max_len else name
+
 
 # ===========================================================================
 # Utility cleanup CUDA — evita crash a fine trascrizione
@@ -586,6 +619,12 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
 
+        # File di log per la sessione corrente (creato a ogni nuovo processing)
+        self._log_file = None
+        self._log_file_path = None
+        self._log_lock = threading.Lock()
+        self._log_inizio_ts = None
+
         # Grid principale: la riga del log si espande
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
@@ -595,6 +634,116 @@ class App(ctk.CTk):
         self._crea_sezione_trascrizione()
         self._crea_sezione_log()
         self._crea_status_bar()
+
+        # Chiudi log file in modo pulito alla chiusura della finestra
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        try:
+            self._chiudi_log_file(motivo="chiusura applicazione")
+        except Exception:
+            pass
+        self.destroy()
+
+    # ===================================================================
+    # Logging su file: gestione apertura/chiusura/scrittura
+    # ===================================================================
+    def _apri_log_file(self, operazione, contesto=""):
+        """Apre un nuovo file di log per il processing corrente.
+
+        operazione: identifica il tipo (es. 'elabora_video',
+                    'elabora_e_trascrivi', 'trascrivi_segmenti',
+                    'trascrivi_da_cartella')
+        contesto:   info aggiuntiva per identificare il file (nome video,
+                    nome cartella, ecc.)
+        Ritorna il path del file creato, o None in caso di errore.
+        """
+        try:
+            log_dir = _get_log_dir()
+            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            contesto_clean = _sanitize_filename(contesto) if contesto else ""
+
+            if contesto_clean:
+                nome_log = f"{timestamp}_{operazione}_{contesto_clean}.log"
+            else:
+                nome_log = f"{timestamp}_{operazione}.log"
+            path_log = os.path.join(log_dir, nome_log)
+
+            with self._log_lock:
+                # Chiudi un eventuale log precedente ancora aperto
+                if self._log_file is not None:
+                    try:
+                        self._log_file.close()
+                    except Exception:
+                        pass
+                    self._log_file = None
+
+                self._log_inizio_ts = time.time()
+                self._log_file = open(path_log, "w", encoding="utf-8")
+                self._log_file_path = path_log
+
+                # Header del log: utile per recuperare metriche/config dopo
+                try:
+                    modello = self.modello_var.get()
+                    lingua = self.lingua_var.get()
+                    device = self.device_var.get()
+                    formato = self.formato_var.get()
+                except Exception:
+                    modello = lingua = device = formato = "n/d"
+
+                self._log_file.write(f"{'='*70}\n")
+                self._log_file.write(f"LOG SESSIONE — {operazione.upper()}\n")
+                self._log_file.write(f"{'='*70}\n")
+                self._log_file.write(f"Avvio:    {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                if contesto:
+                    self._log_file.write(f"Contesto: {contesto}\n")
+                self._log_file.write(f"Modello:  {modello}\n")
+                self._log_file.write(f"Lingua:   {lingua}\n")
+                self._log_file.write(f"Device:   {device}\n")
+                self._log_file.write(f"Formato:  {formato}\n")
+                self._log_file.write(f"Sistema:  {sys.platform} | Python {sys.version.split()[0]}\n")
+                self._log_file.write(f"{'='*70}\n\n")
+                self._log_file.flush()
+
+            return path_log
+        except Exception as e:
+            # Non bloccare l'app se il logging fallisce
+            try:
+                print(f"[LOG] Errore apertura file di log: {e}")
+            except Exception:
+                pass
+            with self._log_lock:
+                self._log_file = None
+                self._log_file_path = None
+            return None
+
+    def _chiudi_log_file(self, motivo="completato"):
+        """Chiude il file di log corrente con un footer riassuntivo."""
+        with self._log_lock:
+            if self._log_file is not None:
+                try:
+                    durata = time.time() - (self._log_inizio_ts or time.time())
+                    self._log_file.write(f"\n{'='*70}\n")
+                    self._log_file.write(f"Chiusura:      {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    self._log_file.write(f"Motivo:        {motivo}\n")
+                    self._log_file.write(f"Durata totale: {formatta_tempo(durata)}\n")
+                    self._log_file.write(f"{'='*70}\n")
+                    self._log_file.flush()
+                    self._log_file.close()
+                except Exception:
+                    pass
+                self._log_file = None
+                # Manteniamo _log_file_path per riferimento (link nel log testuale)
+
+    def _scrivi_su_file_log(self, msg):
+        """Scrittura thread-safe sul file di log corrente, se aperto."""
+        with self._log_lock:
+            if self._log_file is not None:
+                try:
+                    self._log_file.write(msg + "\n")
+                    self._log_file.flush()
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------------
     # Header
@@ -774,9 +923,17 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
 
-        # Pulsanti Pausa e Stop
+        # Pulsanti Pausa, Stop e Apri cartella log
         self.ctrl_frame = ctk.CTkFrame(top_row, fg_color="transparent")
         self.ctrl_frame.grid(row=0, column=1, sticky="e")
+
+        self.btn_apri_logs = ctk.CTkButton(
+            self.ctrl_frame, text="📁 Logs", width=80,
+            command=self._apri_cartella_logs,
+            fg_color=COLORE_GRIGIO, hover_color="#5a5a5a",
+            font=ctk.CTkFont(size=12), height=30,
+        )
+        self.btn_apri_logs.pack(side="left", padx=(0, 5))
 
         self.btn_pausa = ctk.CTkButton(
             self.ctrl_frame, text="⏸ Pausa", width=90,
@@ -804,6 +961,19 @@ class App(ctk.CTk):
         )
         self.log_text.grid(row=2, column=0, padx=15, pady=(0, 12), sticky="nsew")
 
+    def _apri_cartella_logs(self):
+        """Apre la cartella dei log nel file explorer del sistema operativo."""
+        log_dir = _get_log_dir()
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(log_dir)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", log_dir])
+            else:
+                subprocess.Popen(["xdg-open", log_dir])
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile aprire la cartella:\n{log_dir}\n\n{e}")
+
     # -------------------------------------------------------------------
     # Status bar
     # -------------------------------------------------------------------
@@ -819,6 +989,10 @@ class App(ctk.CTk):
     # Utility
     # ===================================================================
     def _log(self, msg):
+        # Scrivi nel file di log se aperto (thread-safe)
+        self._scrivi_su_file_log(msg)
+
+        # Aggiorna la GUI sul main thread
         def _append():
             self.log_text.insert("end", msg + "\n")
             self.log_text.see("end")
@@ -974,12 +1148,19 @@ class App(ctk.CTk):
         self.video_size_mb = get_file_size_mb(video_path)
         self._set_in_esecuzione(True)
 
+        # --- Apri file di log per questa sessione ---
+        operazione = "elabora_e_trascrivi" if auto_trascrivi else "elabora_video"
+        nome_video = os.path.basename(video_path)
+        log_path = self._apri_log_file(operazione, contesto=nome_video)
+
         modalita = "ELABORAZIONE + TRASCRIZIONE" if auto_trascrivi else "ELABORAZIONE VIDEO"
         self._log(f"\n{'━'*50}")
         self._log(f"🎬  {modalita}")
         self._log(f"{'━'*50}")
-        self._log(f"   File: {os.path.basename(video_path)}")
+        self._log(f"   File: {nome_video}")
         self._log(f"   Dimensione: {self.video_size_mb:.1f} MB")
+        if log_path:
+            self._log(f"   📝 Log: {log_path}")
         if auto_trascrivi:
             self._log(f"   Modalita': one-click (split → trascrivi)\n")
         else:
@@ -991,6 +1172,7 @@ class App(ctk.CTk):
         device = self.device_var.get()
 
         def lavoro():
+            motivo_chiusura = "completato"
             try:
                 from moviepy.video.io.VideoFileClip import VideoFileClip
 
@@ -1003,6 +1185,7 @@ class App(ctk.CTk):
                     self.after(0, lambda: messagebox.showerror(
                         "Errore", "Il video non contiene audio."))
                     video.close()
+                    motivo_chiusura = "errore: video senza audio"
                     return
 
                 self._set_status("Estrazione audio...")
@@ -1031,6 +1214,7 @@ class App(ctk.CTk):
                     except:
                         pass
                     self._log("⏹  Interrotto dopo estrazione audio")
+                    motivo_chiusura = "interrotto dall'utente"
                     return
 
                 self._set_status("Segmentazione audio...")
@@ -1054,6 +1238,7 @@ class App(ctk.CTk):
 
                 if self.stop_event.is_set() and not segments:
                     self._set_status("Interrotto")
+                    motivo_chiusura = "interrotto dall'utente"
                     return
 
                 if segments:
@@ -1094,12 +1279,15 @@ class App(ctk.CTk):
                         else:
                             if self.stop_event.is_set():
                                 self._set_status("Interrotto — progresso e file parziale salvati")
+                                motivo_chiusura = "interrotto dall'utente (trascrizione)"
                             else:
                                 self._set_status("Splitting OK, nessun file trascritto")
+                                motivo_chiusura = "nessun file trascritto"
                     elif self.stop_event.is_set():
                         self._set_status("Interrotto dopo splitting")
                         self._log(f"\n✅ Splitting completato. Trascrizione non avviata (interrotto).")
                         self._log(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
+                        motivo_chiusura = "interrotto dall'utente (dopo splitting)"
                     else:
                         self._set_status("Splitting completato!")
                         self._log(f"\n✅ Puoi ora cliccare 'Trascrivi Segmenti'")
@@ -1109,11 +1297,13 @@ class App(ctk.CTk):
                             f"Percorso: {output_dir}"))
                 else:
                     self._set_status("Errore splitting")
+                    motivo_chiusura = "errore splitting (nessun segmento)"
                     self.after(0, lambda: messagebox.showerror("Errore",
                         "Nessun segmento creato."))
             except ImportError as e:
                 self._set_status("Errore trascrizione")
                 self._log(f"\n✗ ERRORE: {e}")
+                motivo_chiusura = f"errore: {e}"
                 self.after(0, lambda: messagebox.showerror("Errore", str(e)))
             except Exception as e:
                 self._set_status("Errore")
@@ -1121,9 +1311,11 @@ class App(ctk.CTk):
                 if "'NoneType'" in err:
                     err = "FFmpeg non trovato o non configurato."
                 self._log(f"✗ ERRORE: {err}")
+                motivo_chiusura = f"errore: {err}"
                 self.after(0, lambda: messagebox.showerror("Errore", err))
             finally:
                 self._set_in_esecuzione(False)
+                self._chiudi_log_file(motivo=motivo_chiusura)
 
         threading.Thread(target=lavoro, daemon=True).start()
 
@@ -1146,7 +1338,8 @@ class App(ctk.CTk):
                 "Nessuna cartella disponibile.\n"
                 "Elabora prima un video o usa 'Trascrivi da Cartella...'.")
             return
-        self._esegui_trascrizione(self.cartella_segmenti)
+        self._esegui_trascrizione(self.cartella_segmenti,
+                                  operazione="trascrivi_segmenti")
 
     def _trascrivi_da_cartella(self):
         if self.in_esecuzione:
@@ -1154,14 +1347,23 @@ class App(ctk.CTk):
         cartella = filedialog.askdirectory(title="Seleziona cartella con file audio")
         if cartella:
             self.cartella_segmenti = cartella
-            self._esegui_trascrizione(cartella)
+            self._esegui_trascrizione(cartella,
+                                      operazione="trascrivi_da_cartella")
 
-    def _esegui_trascrizione(self, cartella):
+    def _esegui_trascrizione(self, cartella, operazione="trascrivi_segmenti"):
         self._set_in_esecuzione(True)
+
+        # --- Apri file di log per questa sessione ---
+        nome_cartella = os.path.basename(os.path.normpath(cartella))
+        log_path = self._apri_log_file(operazione, contesto=nome_cartella)
+
         self._log(f"\n{'━'*50}")
         self._log(f"🎙  TRASCRIZIONE")
         self._log(f"{'━'*50}")
-        self._log(f"   Cartella: {cartella}\n")
+        self._log(f"   Cartella: {cartella}")
+        if log_path:
+            self._log(f"   📝 Log: {log_path}")
+        self._log("")
         self._set_status("Trascrizione in corso...")
 
         lingua = self._get_lingua()
@@ -1170,6 +1372,7 @@ class App(ctk.CTk):
         device = self.device_var.get()
 
         def lavoro():
+            motivo_chiusura = "completato"
             try:
                 percorso_out, tempo_trasc = trascrivi_segmenti(
                     cartella=cartella, modello_nome=modello,
@@ -1190,14 +1393,18 @@ class App(ctk.CTk):
                 else:
                     if self.stop_event.is_set():
                         self._set_status("Interrotto — progresso e file parziale salvati")
+                        motivo_chiusura = "interrotto dall'utente"
                     else:
                         self._set_status("Nessun file trascritto")
+                        motivo_chiusura = "nessun file trascritto"
             except Exception as e:
                 self._set_status("Errore trascrizione")
                 self._log(f"\n✗ ERRORE: {e}")
+                motivo_chiusura = f"errore: {e}"
                 self.after(0, lambda: messagebox.showerror("Errore", str(e)))
             finally:
                 self._set_in_esecuzione(False)
+                self._chiudi_log_file(motivo=motivo_chiusura)
 
         threading.Thread(target=lavoro, daemon=True).start()
 
