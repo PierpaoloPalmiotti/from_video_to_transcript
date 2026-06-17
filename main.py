@@ -11,9 +11,11 @@ import warnings
 import subprocess
 import tempfile
 import threading
+from datetime import datetime
 
 # Sopprimi i warnings
 warnings.filterwarnings("ignore")
+
 
 # ---------------------------------------------------------------------------
 # CustomTkinter: tema e aspetto
@@ -73,6 +75,8 @@ MODELLI_WHISPER = [
     "large-v2", "large-v3", "large-v3-turbo",
 ]
 ESTENSIONI_AUDIO = ('.wav', '.mp3', '.ogg', '.opus', '.m4a', '.flac', '.wma', '.aac')
+ESTENSIONI_VIDEO = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm',
+                    '.m4v', '.mpg', '.mpeg', '.ts', '.3gp')
 
 # Colori custom
 COLORE_ACCENT = "#1f6aa5"
@@ -84,41 +88,10 @@ COLORE_TESTO_LOG = "#e0e0e0"
 COLORE_TESTO_DIM = "#888888"
 COLORE_ARANCIO = "#d4781f"
 COLORE_GIALLO = "#b8860b"
+COLORE_VIOLA = "#7d3c98"
 
 PROGRESSO_FILE = "_progresso.json"
-
-# ---------------------------------------------------------------------------
-# Logging su file: configurazione
-# ---------------------------------------------------------------------------
-LOG_DIR_NAME = "logs"
-
-
-def _get_log_dir():
-    """Restituisce la cartella dei log, creandola se non esiste.
-    Si posiziona accanto allo script (o all'eseguibile PyInstaller)."""
-    try:
-        if getattr(sys, 'frozen', False):
-            # Eseguibile PyInstaller
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.path.dirname(os.path.abspath(__file__))
-    except Exception:
-        base = os.path.abspath(".")
-    log_dir = os.path.join(base, LOG_DIR_NAME)
-    try:
-        os.makedirs(log_dir, exist_ok=True)
-    except Exception:
-        pass
-    return log_dir
-
-
-def _sanitize_filename(name, max_len=80):
-    """Sostituisce caratteri non validi nei nomi file e tronca se troppo lungo."""
-    if not name:
-        return ""
-    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
-    name = name.strip().strip('.').replace(' ', '_')
-    return name[:max_len] if len(name) > max_len else name
+BATCH_PROGRESSO_FILE = "_batch_progresso.json"
 
 
 # ===========================================================================
@@ -197,6 +170,12 @@ def get_file_size_mb(file_path):
         return 0
 
 
+def ordine_naturale(nome):
+    """Ordinamento naturale basato sull'ultimo numero presente nel nome."""
+    numeri = re.findall(r'\d+', nome)
+    return int(numeri[-1]) if numeri else 0
+
+
 def split_audio_with_ffmpeg(input_path, output_dir, target_size_mb, base_name,
                             callback=None, stop_event=None):
     ffmpeg_path = find_ffmpeg()
@@ -265,21 +244,95 @@ def split_audio_with_ffmpeg(input_path, output_dir, target_size_mb, base_name,
     return segments_created, segment_duration / 60
 
 
+def estrai_e_splitta_video(video_path, output_dir, target_size_mb,
+                           callback=None, stop_event=None):
+    """Estrae l'audio da un video e lo segmenta in `output_dir`.
+
+    Backend GUI-agnostico: usa solo `callback` per il log e `stop_event`
+    per l'interruzione. È condiviso dal flusso singolo video e dal batch.
+
+    Ritorna: (lista_segmenti, durata_media_min, tempo_splitting_secondi).
+    Solleva Exception se il video non contiene audio.
+    """
+    from moviepy.video.io.VideoFileClip import VideoFileClip
+    import contextlib, io
+
+    t0 = time.time()
+    if callback:
+        callback("⏳ Caricamento video...")
+    video = VideoFileClip(video_path)
+    if video.audio is None:
+        video.close()
+        raise Exception("Il video non contiene audio.")
+
+    if callback:
+        callback("⏳ Estrazione audio...")
+    audio = video.audio
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    os.makedirs(output_dir, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+        temp_audio_path = tmp.name
+
+    try:
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+            audio.write_audiofile(temp_audio_path, codec='pcm_s16le')
+    except Exception:
+        audio.write_audiofile(temp_audio_path)
+
+    if stop_event and stop_event.is_set():
+        audio.close()
+        video.close()
+        try:
+            os.unlink(temp_audio_path)
+        except:
+            pass
+        if callback:
+            callback("⏹  Interrotto dopo estrazione audio")
+        return [], 0.0, time.time() - t0
+
+    if callback:
+        callback("⏳ Segmentazione audio...\n")
+
+    segments, seg_dur_min = split_audio_with_ffmpeg(
+        temp_audio_path, output_dir, target_size_mb, base_name,
+        callback=callback, stop_event=stop_event)
+
+    audio.close()
+    video.close()
+    try:
+        os.unlink(temp_audio_path)
+    except:
+        pass
+
+    return segments, seg_dur_min, time.time() - t0
+
+
 def trova_file_audio(cartella):
     file_audio = [
         f for f in os.listdir(cartella)
         if os.path.isfile(os.path.join(cartella, f))
         and os.path.splitext(f)[1].lower() in ESTENSIONI_AUDIO
     ]
-    def ordine_naturale(nome):
-        numeri = re.findall(r'\d+', nome)
-        return int(numeri[-1]) if numeri else 0
     file_audio.sort(key=ordine_naturale)
     return file_audio
 
 
+def trova_file_video(cartella):
+    """Ritorna i soli file video presenti direttamente nella cartella
+    (non ricorsivo), ordinati in modo naturale."""
+    file_video = [
+        f for f in os.listdir(cartella)
+        if os.path.isfile(os.path.join(cartella, f))
+        and os.path.splitext(f)[1].lower() in ESTENSIONI_VIDEO
+    ]
+    file_video.sort(key=ordine_naturale)
+    return file_video
+
+
 # ---------------------------------------------------------------------------
-# Checkpoint: salvataggio / caricamento progresso
+# Checkpoint: salvataggio / caricamento progresso (per cartella di segmenti)
 # ---------------------------------------------------------------------------
 
 def _carica_progresso(cartella):
@@ -333,12 +386,39 @@ def _scrivi_file_trascrizione(cartella, risultati, risultati_dettaglio,
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint di livello BATCH (per progetto Wiki)
+# ---------------------------------------------------------------------------
+
+def _carica_batch_progresso(cartella_progetto):
+    path = os.path.join(cartella_progetto, BATCH_PROGRESSO_FILE)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"completati": []}
+
+
+def _salva_batch_progresso(cartella_progetto, dati):
+    path = os.path.join(cartella_progetto, BATCH_PROGRESSO_FILE)
+    try:
+        os.makedirs(cartella_progetto, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(dati, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Trascrizione con checkpoint + stop/pausa + file parziale
 # ---------------------------------------------------------------------------
 
 def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
                        device="auto", formato="txt", callback=None,
-                       stop_event=None, pause_event=None):
+                       stop_event=None, pause_event=None,
+                       video_size_mb=0, tempo_splitting=0,
+                       model_precaricato=None):
     if not WHISPER_DISPONIBILE:
         raise ImportError("faster-whisper non installato.\nInstalla con: pip install faster-whisper")
 
@@ -352,27 +432,32 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
         dev = device
 
     compute = "float16" if dev == "cuda" else "int8"
-    if callback:
-        callback(f"⏳ Caricamento modello '{modello_nome}' su {dev} ({compute})...")
+
+    # Se ci viene passato un modello già caricato (batch), lo riusiamo e NON
+    # lo liberiamo qui: la gestione del ciclo di vita è del chiamante.
+    model = model_precaricato
+    model_di_proprieta = model is None
 
     t0 = time.time()
-    model = None
     try:
-        try:
-            model = WhisperModel(modello_nome, device=dev, compute_type=compute)
-        except Exception as e:
-            if dev == "cuda":
-                if callback:
-                    callback(f"⚠ CUDA non disponibile ({e})")
-                    callback(f"⏳ Fallback automatico su CPU (int8)...")
-                dev = "cpu"
-                compute = "int8"
+        if model is None:
+            if callback:
+                callback(f"⏳ Caricamento modello '{modello_nome}' su {dev} ({compute})...")
+            try:
                 model = WhisperModel(modello_nome, device=dev, compute_type=compute)
-            else:
-                raise
-        dt = time.time() - t0
-        if callback:
-            callback(f"✓ Modello caricato in {dt:.1f}s (device={dev})\n")
+            except Exception as e:
+                if dev == "cuda":
+                    if callback:
+                        callback(f"⚠ CUDA non disponibile ({e})")
+                        callback(f"⏳ Fallback automatico su CPU (int8)...")
+                    dev = "cpu"
+                    compute = "int8"
+                    model = WhisperModel(modello_nome, device=dev, compute_type=compute)
+                else:
+                    raise
+            dt = time.time() - t0
+            if callback:
+                callback(f"✓ Modello caricato in {dt:.1f}s (device={dev})\n")
 
         file_audio = trova_file_audio(cartella)
         if not file_audio:
@@ -399,7 +484,8 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
                 callback("✅ Tutti i segmenti sono gia' stati trascritti.")
             percorso_output = _finalizza_trascrizione(
                 cartella, risultati, risultati_dettaglio,
-                durata_totale, file_audio, formato, 0, callback)
+                durata_totale, file_audio, formato, 0, callback,
+                video_size_mb=video_size_mb, tempo_splitting=tempo_splitting)
             return percorso_output, 0.0
 
         if callback:
@@ -503,21 +589,23 @@ def trascrivi_segmenti(cartella, modello_nome="large-v3-turbo", lingua=None,
         # Trascrizione completata al 100%
         percorso_output = _finalizza_trascrizione(
             cartella, risultati, risultati_dettaglio,
-            durata_totale, file_audio, formato, tempo_trascrizione, callback)
+            durata_totale, file_audio, formato, tempo_trascrizione, callback,
+            video_size_mb=video_size_mb, tempo_splitting=tempo_splitting)
 
         return percorso_output, tempo_trascrizione
 
     finally:
-        # IMPORTANTE: libera esplicitamente il modello e la cache CUDA
-        # PRIMA che la funzione ritorni e la GUI mostri il messagebox.
-        # Senza questo, il GC può liberare il modello CUDA in un momento
-        # arbitrario causando crash che chiudono l'app dopo la fine.
-        _libera_risorse_cuda(model, dev, callback=callback)
+        # Libera il modello solo se l'abbiamo creato noi in questa chiamata.
+        # In modalità batch il modello è condiviso e viene liberato dal
+        # chiamante a fine ciclo.
+        if model_di_proprieta:
+            _libera_risorse_cuda(model, dev, callback=callback)
 
 
 def _finalizza_trascrizione(cartella, risultati, risultati_dettaglio,
                             durata_totale, file_audio, formato,
-                            tempo_trascrizione, callback):
+                            tempo_trascrizione, callback,
+                            video_size_mb=0, tempo_splitting=0):
     """Scrive il file finale, pulisce audio e rimuove il checkpoint."""
 
     percorso_output = _scrivi_file_trascrizione(
@@ -534,6 +622,9 @@ def _finalizza_trascrizione(cartella, risultati, risultati_dettaglio,
         callback(f"   Tempo trascrizione:   {formatta_tempo(tempo_trascrizione)}")
         if tempo_trascrizione > 0:
             callback(f"   Velocita':            {durata_totale/tempo_trascrizione:.1f}x tempo reale")
+        if video_size_mb > 0 and (tempo_splitting + tempo_trascrizione) > 0:
+            sec_per_mb = (tempo_splitting + tempo_trascrizione) / video_size_mb
+            callback(f"   Performance E2E:      {sec_per_mb:.2f} sec/MB")
         callback(f"   Salvato in:           {percorso_output}")
 
     # Pulizia segmenti audio (solo se completato al 100%)
@@ -598,6 +689,386 @@ def formatta_tempo(secondi):
 
 
 # ===========================================================================
+# LLM WIKI — generazione struttura a partire dalle trascrizioni
+# ===========================================================================
+
+def _slug(nome):
+    s = re.sub(r'[^\w\-]+', '_', nome, flags=re.UNICODE).strip('_')
+    return s or "sorgente"
+
+
+def _scrivi_sorgente_wiki(raw_dir, indice, video_name, testo, n_segmenti):
+    """Scrive una trascrizione come sorgente markdown immutabile in raw/.
+    Ritorna il percorso del file creato."""
+    base = os.path.splitext(video_name)[0]
+    nome_md = f"{indice:02d}_{_slug(base)}.md"
+    path = os.path.join(raw_dir, nome_md)
+    oggi = datetime.now().strftime('%Y-%m-%d')
+
+    if not (testo or "").strip():
+        corpo_testo = "_(Nessun parlato rilevato nella trascrizione.)_"
+    else:
+        corpo_testo = testo.strip()
+
+    frontmatter = (
+        "---\n"
+        f"source: {video_name}\n"
+        "type: transcript\n"
+        f"date: {oggi}\n"
+        f"index: {indice:02d}\n"
+        f"segments: {n_segmenti}\n"
+        "tags: [trascrizione, sorgente]\n"
+        "---\n\n"
+    )
+    corpo = f"# Trascrizione — {base}\n\n{corpo_testo}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(frontmatter + corpo)
+    return path
+
+
+CLAUDE_SCHEMA = """# Schema della Wiki — Istruzioni per l'agente LLM
+
+Questa cartella è una **LLM Wiki**: una base di conoscenza in markdown che TU
+(l'agente) costruisci e mantieni a partire dalle trascrizioni video presenti in
+`raw/`. L'utente cura le fonti e fa le domande; tu fai tutto il lavoro di sintesi,
+collegamento e manutenzione. La cartella va aperta come vault in Obsidian.
+
+A differenza di un classico RAG, qui la conoscenza non viene riscoperta a ogni
+domanda: viene **compilata una volta e tenuta aggiornata**. La wiki è un artefatto
+persistente che si arricchisce con ogni nuova sorgente e con ogni domanda.
+
+## Struttura
+- `raw/` — fonti **immutabili**: una trascrizione per video. Non modificarle mai.
+- `wiki/` — pagine generate da te: sintesi, pagine entità, pagine concetto, confronti.
+- `wiki/index.md` — catalogo di tutte le pagine. Aggiornalo a ogni ingest.
+- `wiki/log.md` — registro cronologico append-only (ingest, query, lint).
+- `CLAUDE.md` / `AGENTS.md` — questo schema. Co-evolvilo con l'utente nel tempo.
+
+## Convenzioni
+- Tutto in markdown, in italiano.
+- Collegamenti con i wikilink di Obsidian: `[[Nome Pagina]]`.
+- Nomi file: `entita_<nome>.md`, `concetto_<nome>.md`, `sintesi_<tema>.md`,
+  `sorgente_<slug>.md`.
+- Ogni pagina inizia con frontmatter YAML (vedi sotto).
+- Quando un dato nuovo contraddice uno vecchio, segnalalo con un blocco
+  `> [!warning]` e cita entrambe le fonti.
+- Cita sempre le fonti `raw/` da cui proviene un'affermazione.
+
+## Operazioni
+
+### Ingest (una fonte alla volta, consigliato)
+1. Leggi la trascrizione in `raw/`.
+2. Discuti con l'utente i punti chiave.
+3. Crea una pagina di sintesi della fonte: `wiki/sorgente_<slug>.md`.
+4. Crea/aggiorna le pagine entità e concetto collegate (persone, progetti,
+   decisioni, strumenti, temi ricorrenti).
+5. Aggiorna i cross-reference esistenti.
+6. Aggiorna `wiki/index.md`.
+7. Aggiungi una riga a `wiki/log.md`:
+   `## [AAAA-MM-GG] ingest | <titolo sorgente>`.
+   Una singola fonte può toccare 10-15 pagine.
+
+### Query
+1. Leggi prima `wiki/index.md` per individuare le pagine rilevanti.
+2. Apri le pagine, sintetizza la risposta con citazioni alle fonti `raw/`.
+3. Se la risposta è preziosa, archiviala come nuova pagina in `wiki/` e
+   aggiorna l'index: le esplorazioni devono accumularsi, non perdersi in chat.
+
+### Lint (manutenzione periodica)
+Cerca: contraddizioni tra pagine, affermazioni superate da fonti più recenti,
+pagine orfane (senza link in entrata), concetti citati ma senza pagina propria,
+cross-reference mancanti, lacune colmabili con una ricerca. Proponi nuove domande
+da investigare e nuove fonti da cercare.
+
+## Formati
+
+### Frontmatter pagina wiki
+```yaml
+---
+title: <titolo>
+type: entita | concetto | sintesi | sorgente
+fonti: [01_video1, 02_video2]
+aggiornato: AAAA-MM-GG
+tags: [...]
+---
+```
+
+### index.md
+Organizzato per categoria: Sorgenti, Entità, Concetti, Sintesi.
+Ogni voce: `- [[pagina]] — riassunto in una riga`.
+
+### log.md
+Append-only. Ogni voce inizia con `## [AAAA-MM-GG] <tipo> | <titolo>`,
+così è interrogabile con `grep "^## \\[" wiki/log.md | tail -5`.
+
+## Flusso tipico per l'utente
+1. Apri questa cartella come vault in Obsidian.
+2. Apri un agente (es. Claude Code) nella stessa cartella.
+3. "Leggi CLAUDE.md e fai l'ingest delle sorgenti in raw/, una alla volta."
+4. Naviga il risultato in Obsidian (graph view, link, index).
+"""
+
+README_WIKI = """# LLM Wiki — Guida rapida
+
+Questa cartella è un progetto **LLM Wiki**: una base di conoscenza in markdown
+costruita a partire dalle trascrizioni dei tuoi video, mantenuta da un agente LLM
+(es. Claude Code) e navigata in Obsidian.
+
+## Come usarla
+1. Apri **questa cartella** come vault in Obsidian.
+2. Apri un agente LLM (es. Claude Code) nella stessa cartella.
+3. Chiedi all'agente di leggere `CLAUDE.md` e di fare l'**ingest** delle sorgenti
+   in `raw/`, una alla volta.
+4. L'agente costruisce le pagine in `wiki/` e mantiene `wiki/index.md` e
+   `wiki/log.md`.
+5. Fai domande: l'agente risponde dalla wiki e archivia le risposte utili.
+
+## Struttura
+- `raw/` — trascrizioni dei video (fonti immutabili).
+- `wiki/` — pagine generate dall'agente (sintesi, entità, concetti).
+- `CLAUDE.md` / `AGENTS.md` — istruzioni per l'agente (lo schema).
+- `_segmenti/` — cartelle di lavoro per video (puoi ignorarle/eliminarle).
+"""
+
+
+def genera_struttura_wiki(cartella_progetto, cartella_video_origine, callback=None):
+    """Crea/aggiorna lo scaffold della LLM Wiki nel progetto.
+
+    Non sovrascrive CLAUDE.md, README, index.md se già presenti (la wiki è
+    di proprietà dell'agente): aggiunge solo ciò che manca e logga il batch.
+    """
+    raw_dir = os.path.join(cartella_progetto, "raw")
+    wiki_dir = os.path.join(cartella_progetto, "wiki")
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(wiki_dir, exist_ok=True)
+    oggi = datetime.now().strftime('%Y-%m-%d')
+
+    sorgenti_md = sorted(
+        [f for f in os.listdir(raw_dir) if f.lower().endswith(".md")],
+        key=ordine_naturale)
+
+    # CLAUDE.md + AGENTS.md (solo se mancanti)
+    claude_path = os.path.join(cartella_progetto, "CLAUDE.md")
+    if not os.path.exists(claude_path):
+        with open(claude_path, "w", encoding="utf-8") as f:
+            f.write(CLAUDE_SCHEMA)
+        try:
+            with open(os.path.join(cartella_progetto, "AGENTS.md"),
+                      "w", encoding="utf-8") as f:
+                f.write(CLAUDE_SCHEMA)
+        except Exception:
+            pass
+
+    # README_WIKI.md (solo se mancante)
+    readme_path = os.path.join(cartella_progetto, "README_WIKI.md")
+    if not os.path.exists(readme_path):
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(README_WIKI)
+
+    # wiki/index.md starter (solo se mancante)
+    index_path = os.path.join(wiki_dir, "index.md")
+    if not os.path.exists(index_path):
+        righe = [
+            "# Indice della Wiki", "",
+            f"_Generato il {oggi}. Da qui in avanti lo mantiene l'agente LLM._", "",
+            "## Sorgenti (raw)", "",
+        ]
+        for s in sorgenti_md:
+            nome = os.path.splitext(s)[0]
+            righe.append(f"- [[{nome}]] — _(da sintetizzare)_")
+        righe += ["", "## Entità", "", "_(vuoto)_", "",
+                  "## Concetti", "", "_(vuoto)_", "",
+                  "## Sintesi", "", "_(vuoto)_", ""]
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(righe))
+
+    # wiki/log.md: crea se manca, poi append della voce di batch
+    log_path = os.path.join(wiki_dir, "log.md")
+    if not os.path.exists(log_path):
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("# Log della Wiki\n\nRegistro cronologico append-only.\n\n")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"## [{oggi}] batch | preparate {len(sorgenti_md)} sorgenti "
+                f"da '{os.path.basename(os.path.normpath(cartella_video_origine))}'\n")
+        f.write("- Sorgenti aggiornate in `raw/` e pronte per l'ingest.\n")
+        f.write("- Prossimo passo: l'agente fa l'ingest una fonte alla volta.\n\n")
+
+    if callback:
+        callback(f"📚 Struttura Wiki pronta/aggiornata in: {cartella_progetto}")
+
+
+# ===========================================================================
+# BATCH — processa tutti i video di una cartella e prepara la Wiki
+# ===========================================================================
+
+def elabora_cartella_video(cartella_video, target_size_mb, modello, lingua,
+                           device, formato, genera_wiki=True,
+                           callback=None, stop_event=None, pause_event=None):
+    """Processa TUTTI i video di una cartella (estrai → splitta → trascrivi)
+    e prepara la struttura LLM Wiki con tutte le trascrizioni come sorgenti.
+
+    È resumable a livello di video (checkpoint di batch) e a livello di
+    segmento (checkpoint per cartella). Carica il modello Whisper UNA sola
+    volta e lo riusa per tutti i video.
+
+    Ritorna un dict di riepilogo (o None se non ci sono video).
+    """
+    file_video = trova_file_video(cartella_video)
+    if not file_video:
+        if callback:
+            callback("⚠ Nessun file video trovato nella cartella.")
+        return None
+
+    nome_progetto = os.path.basename(os.path.normpath(cartella_video))
+    cartella_progetto = os.path.join(cartella_video, f"_Wiki_{nome_progetto}")
+    raw_dir = os.path.join(cartella_progetto, "raw")
+    seg_root = os.path.join(cartella_progetto, "_segmenti")
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(seg_root, exist_ok=True)
+
+    batch_prog = _carica_batch_progresso(cartella_progetto)
+    completati = set(batch_prog.get("completati", []))
+
+    if callback:
+        callback(f"📁 Cartella: {cartella_video}")
+        callback(f"🎞  Video trovati: {len(file_video)}")
+        if completati:
+            callback(f"🔄 Già completati in un run precedente: {len(completati)}")
+        callback(f"📦 Progetto Wiki: {cartella_progetto}\n")
+
+    # --- Risoluzione device + caricamento UNICO del modello ---
+    if device == "auto":
+        try:
+            import torch
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            dev = "cpu"
+    else:
+        dev = device
+    compute = "float16" if dev == "cuda" else "int8"
+
+    if callback:
+        callback(f"⏳ Caricamento modello '{modello}' su {dev} ({compute}) (una sola volta)...")
+    t_model = time.time()
+    model = None
+    try:
+        model = WhisperModel(modello, device=dev, compute_type=compute)
+    except Exception as e:
+        if dev == "cuda":
+            if callback:
+                callback(f"⚠ CUDA non disponibile ({e}) — fallback su CPU (int8)")
+            dev = "cpu"
+            compute = "int8"
+            model = WhisperModel(modello, device=dev, compute_type=compute)
+        else:
+            raise
+    if callback:
+        callback(f"✓ Modello caricato in {time.time()-t_model:.1f}s (device={dev})\n")
+
+    t_batch0 = time.time()
+    n_nuovi = 0
+
+    try:
+        for idx, video_name in enumerate(file_video, 1):
+            if stop_event and stop_event.is_set():
+                if callback:
+                    callback(f"\n⏹  Batch interrotto prima del video {idx}/{len(file_video)}.")
+                break
+
+            if video_name in completati:
+                if callback:
+                    callback(f"⏭  [{idx}/{len(file_video)}] {video_name} già fatto — salto")
+                continue
+
+            if callback:
+                callback(f"\n{'━'*50}")
+                callback(f"🎬  [{idx}/{len(file_video)}] {video_name}")
+                callback(f"{'━'*50}")
+
+            video_path = os.path.join(cartella_video, video_name)
+            base = os.path.splitext(video_name)[0]
+            seg_dir = os.path.join(seg_root, f"{idx:02d}_{_slug(base)}")
+
+            # --- Estrazione + splitting ---
+            try:
+                segments, seg_dur_min, t_split = estrai_e_splitta_video(
+                    video_path, seg_dir, target_size_mb,
+                    callback=callback, stop_event=stop_event)
+            except Exception as e:
+                if callback:
+                    callback(f"  ✗ Errore su '{video_name}': {e} — passo al prossimo")
+                continue
+
+            if stop_event and stop_event.is_set():
+                if callback:
+                    callback("⏹  Batch interrotto durante lo splitting (progresso salvato).")
+                break
+            if not segments:
+                if callback:
+                    callback(f"  ⚠ Nessun segmento per '{video_name}' — salto")
+                continue
+
+            # --- Trascrizione (modello condiviso) ---
+            video_mb = get_file_size_mb(video_path)
+            percorso_txt, _ = trascrivi_segmenti(
+                cartella=seg_dir, modello_nome=modello, lingua=lingua,
+                device=dev, formato=formato, callback=callback,
+                stop_event=stop_event, pause_event=pause_event,
+                video_size_mb=video_mb, tempo_splitting=t_split,
+                model_precaricato=model)
+
+            if not percorso_txt:
+                # Interrotto durante la trascrizione (progresso già salvato),
+                # oppure nessun file: in entrambi i casi non marchiamo completato.
+                if stop_event and stop_event.is_set():
+                    if callback:
+                        callback("⏹  Batch interrotto durante la trascrizione (progresso salvato).")
+                    break
+                continue
+
+            # --- Scrivi la trascrizione come sorgente della Wiki ---
+            try:
+                with open(percorso_txt, "r", encoding="utf-8") as f:
+                    testo = f.read()
+            except Exception:
+                testo = ""
+
+            if genera_wiki:
+                raw_md = _scrivi_sorgente_wiki(raw_dir, idx, video_name, testo, len(segments))
+                if callback:
+                    callback(f"  📝 Sorgente Wiki: {os.path.basename(raw_md)}")
+
+            completati.add(video_name)
+            n_nuovi += 1
+            _salva_batch_progresso(cartella_progetto, {"completati": list(completati)})
+            if callback:
+                callback(f"  ✅ '{video_name}' completato")
+
+    finally:
+        # Libera il modello (condiviso) UNA volta sola, a fine batch.
+        _libera_risorse_cuda(model, dev, callback=callback)
+
+    # --- Genera/aggiorna struttura Wiki ---
+    wiki_pronta = False
+    if genera_wiki:
+        raw_files = [f for f in os.listdir(raw_dir) if f.lower().endswith(".md")] \
+            if os.path.isdir(raw_dir) else []
+        if raw_files:
+            genera_struttura_wiki(cartella_progetto, cartella_video, callback=callback)
+            wiki_pronta = True
+
+    return {
+        "cartella_progetto": cartella_progetto,
+        "n_video": len(file_video),
+        "n_completati": len(completati),
+        "n_nuovi": n_nuovi,
+        "tempo": time.time() - t_batch0,
+        "wiki_pronta": wiki_pronta,
+        "interrotto": bool(stop_event and stop_event.is_set()),
+    }
+
+
+# ===========================================================================
 # GUI — CustomTkinter
 # ===========================================================================
 
@@ -606,8 +1077,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("Audio Splitter & Transcriber")
-        self.geometry("700x820")
-        self.minsize(650, 740)
+        self.geometry("700x920")
+        self.minsize(650, 820)
 
         self.cartella_segmenti = None
         self.in_esecuzione = False
@@ -619,12 +1090,6 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
 
-        # File di log per la sessione corrente (creato a ogni nuovo processing)
-        self._log_file = None
-        self._log_file_path = None
-        self._log_lock = threading.Lock()
-        self._log_inizio_ts = None
-
         # Grid principale: la riga del log si espande
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(4, weight=1)
@@ -632,118 +1097,9 @@ class App(ctk.CTk):
         self._crea_header()
         self._crea_sezione_video()
         self._crea_sezione_trascrizione()
+        self._crea_sezione_batch()
         self._crea_sezione_log()
         self._crea_status_bar()
-
-        # Chiudi log file in modo pulito alla chiusura della finestra
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def _on_close(self):
-        try:
-            self._chiudi_log_file(motivo="chiusura applicazione")
-        except Exception:
-            pass
-        self.destroy()
-
-    # ===================================================================
-    # Logging su file: gestione apertura/chiusura/scrittura
-    # ===================================================================
-    def _apri_log_file(self, operazione, contesto=""):
-        """Apre un nuovo file di log per il processing corrente.
-
-        operazione: identifica il tipo (es. 'elabora_video',
-                    'elabora_e_trascrivi', 'trascrivi_segmenti',
-                    'trascrivi_da_cartella')
-        contesto:   info aggiuntiva per identificare il file (nome video,
-                    nome cartella, ecc.)
-        Ritorna il path del file creato, o None in caso di errore.
-        """
-        try:
-            log_dir = _get_log_dir()
-            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-            contesto_clean = _sanitize_filename(contesto) if contesto else ""
-
-            if contesto_clean:
-                nome_log = f"{timestamp}_{operazione}_{contesto_clean}.log"
-            else:
-                nome_log = f"{timestamp}_{operazione}.log"
-            path_log = os.path.join(log_dir, nome_log)
-
-            with self._log_lock:
-                # Chiudi un eventuale log precedente ancora aperto
-                if self._log_file is not None:
-                    try:
-                        self._log_file.close()
-                    except Exception:
-                        pass
-                    self._log_file = None
-
-                self._log_inizio_ts = time.time()
-                self._log_file = open(path_log, "w", encoding="utf-8")
-                self._log_file_path = path_log
-
-                # Header del log: utile per recuperare metriche/config dopo
-                try:
-                    modello = self.modello_var.get()
-                    lingua = self.lingua_var.get()
-                    device = self.device_var.get()
-                    formato = self.formato_var.get()
-                except Exception:
-                    modello = lingua = device = formato = "n/d"
-
-                self._log_file.write(f"{'='*70}\n")
-                self._log_file.write(f"LOG SESSIONE — {operazione.upper()}\n")
-                self._log_file.write(f"{'='*70}\n")
-                self._log_file.write(f"Avvio:    {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                if contesto:
-                    self._log_file.write(f"Contesto: {contesto}\n")
-                self._log_file.write(f"Modello:  {modello}\n")
-                self._log_file.write(f"Lingua:   {lingua}\n")
-                self._log_file.write(f"Device:   {device}\n")
-                self._log_file.write(f"Formato:  {formato}\n")
-                self._log_file.write(f"Sistema:  {sys.platform} | Python {sys.version.split()[0]}\n")
-                self._log_file.write(f"{'='*70}\n\n")
-                self._log_file.flush()
-
-            return path_log
-        except Exception as e:
-            # Non bloccare l'app se il logging fallisce
-            try:
-                print(f"[LOG] Errore apertura file di log: {e}")
-            except Exception:
-                pass
-            with self._log_lock:
-                self._log_file = None
-                self._log_file_path = None
-            return None
-
-    def _chiudi_log_file(self, motivo="completato"):
-        """Chiude il file di log corrente con un footer riassuntivo."""
-        with self._log_lock:
-            if self._log_file is not None:
-                try:
-                    durata = time.time() - (self._log_inizio_ts or time.time())
-                    self._log_file.write(f"\n{'='*70}\n")
-                    self._log_file.write(f"Chiusura:      {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    self._log_file.write(f"Motivo:        {motivo}\n")
-                    self._log_file.write(f"Durata totale: {formatta_tempo(durata)}\n")
-                    self._log_file.write(f"{'='*70}\n")
-                    self._log_file.flush()
-                    self._log_file.close()
-                except Exception:
-                    pass
-                self._log_file = None
-                # Manteniamo _log_file_path per riferimento (link nel log testuale)
-
-    def _scrivi_su_file_log(self, msg):
-        """Scrittura thread-safe sul file di log corrente, se aperto."""
-        with self._log_lock:
-            if self._log_file is not None:
-                try:
-                    self._log_file.write(msg + "\n")
-                    self._log_file.flush()
-                except Exception:
-                    pass
 
     # -------------------------------------------------------------------
     # Header
@@ -778,7 +1134,7 @@ class App(ctk.CTk):
         frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            frame, text="1 │ Estrazione & Segmentazione",
+            frame, text="1 │ Estrazione & Segmentazione (singolo video)",
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, columnspan=3, padx=15, pady=(12, 8), sticky="w")
@@ -906,7 +1262,63 @@ class App(ctk.CTk):
             ).grid(row=4, column=0, columnspan=4, padx=15, pady=(0, 8), sticky="w")
 
     # -------------------------------------------------------------------
-    # Sezione 3: Log + Progress + Controlli Pausa/Stop
+    # Sezione 3: Batch cartella → LLM Wiki
+    # -------------------------------------------------------------------
+    def _crea_sezione_batch(self):
+        frame = ctk.CTkFrame(self)
+        frame.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            frame, text="3 │ Batch Cartella → LLM Wiki",
+            font=ctk.CTkFont(size=14, weight="bold"), anchor="w",
+        ).grid(row=0, column=0, columnspan=3, padx=15, pady=(12, 8), sticky="w")
+
+        ctk.CTkLabel(frame, text="Cartella video:", anchor="w").grid(
+            row=1, column=0, padx=(15, 5), pady=4, sticky="w")
+
+        self.entry_cartella_video = ctk.CTkEntry(
+            frame, placeholder_text="Seleziona una cartella con più video...",
+            state="readonly",
+        )
+        self.entry_cartella_video.grid(row=1, column=1, padx=5, pady=4, sticky="ew")
+
+        ctk.CTkButton(
+            frame, text="📁 Sfoglia", width=100,
+            command=self._browse_cartella_video,
+            fg_color=COLORE_GRIGIO, hover_color="#5a5a5a",
+        ).grid(row=1, column=2, padx=(5, 15), pady=4)
+
+        row_b = ctk.CTkFrame(frame, fg_color="transparent")
+        row_b.grid(row=2, column=0, columnspan=3, padx=15, pady=(4, 12), sticky="ew")
+
+        self.wiki_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            row_b, text="Genera struttura LLM Wiki (raw/ + wiki/ + CLAUDE.md)",
+            variable=self.wiki_var, font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+
+        self.btn_batch = ctk.CTkButton(
+            row_b, text="🚀 Elabora Cartella + Wiki",
+            command=self._elabora_cartella_batch,
+            fg_color=COLORE_VIOLA, hover_color="#633974",
+            font=ctk.CTkFont(size=13, weight="bold"), height=36,
+        )
+        self.btn_batch.pack(side="right")
+
+        ctk.CTkLabel(
+            frame,
+            text="Usa modello/lingua/formato/device della sezione 2 e i MB/segmento "
+                 "della sezione 1. Output: una cartella '_Wiki_<nome>' con tutte le trascrizioni.",
+            text_color=COLORE_TESTO_DIM, font=ctk.CTkFont(size=11),
+            anchor="w", justify="left", wraplength=620,
+        ).grid(row=3, column=0, columnspan=3, padx=15, pady=(0, 10), sticky="w")
+
+        if not WHISPER_DISPONIBILE:
+            self.btn_batch.configure(state="disabled")
+
+    # -------------------------------------------------------------------
+    # Sezione 4: Log + Progress + Controlli Pausa/Stop
     # -------------------------------------------------------------------
     def _crea_sezione_log(self):
         frame = ctk.CTkFrame(self)
@@ -923,17 +1335,9 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
 
-        # Pulsanti Pausa, Stop e Apri cartella log
+        # Pulsanti Pausa e Stop
         self.ctrl_frame = ctk.CTkFrame(top_row, fg_color="transparent")
         self.ctrl_frame.grid(row=0, column=1, sticky="e")
-
-        self.btn_apri_logs = ctk.CTkButton(
-            self.ctrl_frame, text="📁 Logs", width=80,
-            command=self._apri_cartella_logs,
-            fg_color=COLORE_GRIGIO, hover_color="#5a5a5a",
-            font=ctk.CTkFont(size=12), height=30,
-        )
-        self.btn_apri_logs.pack(side="left", padx=(0, 5))
 
         self.btn_pausa = ctk.CTkButton(
             self.ctrl_frame, text="⏸ Pausa", width=90,
@@ -961,19 +1365,6 @@ class App(ctk.CTk):
         )
         self.log_text.grid(row=2, column=0, padx=15, pady=(0, 12), sticky="nsew")
 
-    def _apri_cartella_logs(self):
-        """Apre la cartella dei log nel file explorer del sistema operativo."""
-        log_dir = _get_log_dir()
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(log_dir)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", log_dir])
-            else:
-                subprocess.Popen(["xdg-open", log_dir])
-        except Exception as e:
-            messagebox.showerror("Errore", f"Impossibile aprire la cartella:\n{log_dir}\n\n{e}")
-
     # -------------------------------------------------------------------
     # Status bar
     # -------------------------------------------------------------------
@@ -988,11 +1379,53 @@ class App(ctk.CTk):
     # ===================================================================
     # Utility
     # ===================================================================
-    def _log(self, msg):
-        # Scrivi nel file di log se aperto (thread-safe)
-        self._scrivi_su_file_log(msg)
+    # -------------------------------------------------------------------
+    # Logging su file
+    # -------------------------------------------------------------------
+    def _apri_log_file(self, etichetta="elaborazione"):
+        """Apre un nuovo file di log nella cartella logs/ accanto a main.py."""
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            logs_dir = os.path.join(base_dir, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            nome_file = f"{ts}_{etichetta}.log"
+            self._log_file = open(os.path.join(logs_dir, nome_file),
+                                  "w", encoding="utf-8", buffering=1)
+            intestazione = (
+                f"{'='*60}\n"
+                f"Log elaborazione — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
+                f"{'='*60}\n"
+            )
+            self._log_file.write(intestazione)
+        except Exception as e:
+            self._log_file = None
+            print(f"[WARN] Impossibile aprire log file: {e}")
 
-        # Aggiorna la GUI sul main thread
+    def _chiudi_log_file(self):
+        """Chiude il file di log corrente (se aperto)."""
+        try:
+            if getattr(self, "_log_file", None):
+                self._log_file.write(
+                    f"\n{'='*60}\n"
+                    f"Fine — {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
+                    f"{'='*60}\n"
+                )
+                self._log_file.close()
+        except Exception:
+            pass
+        finally:
+            self._log_file = None
+
+    def _log(self, msg):
+        # Scrivi sul file di log (se aperto)
+        try:
+            if getattr(self, "_log_file", None):
+                ts = datetime.now().strftime("%H:%M:%S")
+                self._log_file.write(f"[{ts}] {msg}\n")
+        except Exception:
+            pass
+        # Aggiorna la GUI
         def _append():
             self.log_text.insert("end", msg + "\n")
             self.log_text.see("end")
@@ -1053,6 +1486,7 @@ class App(ctk.CTk):
             wh_s = s if WHISPER_DISPONIBILE else "disabled"
             self.btn_trascrivi.configure(state=wh_s)
             self.btn_trascrivi_cartella.configure(state=wh_s)
+            self.btn_batch.configure(state=wh_s)
             if stato:
                 self._set_progress(-1)
                 self.stop_event.clear()
@@ -1081,7 +1515,7 @@ class App(ctk.CTk):
         self._log(f"{'━'*50}")
 
     # ===================================================================
-    # Selezione file
+    # Selezione file / cartelle
     # ===================================================================
     def _browse_file(self):
         file_path = filedialog.askopenfilename(
@@ -1098,8 +1532,17 @@ class App(ctk.CTk):
             self.entry_video.configure(state="readonly")
             self._video_path = file_path
 
+    def _browse_cartella_video(self):
+        cartella = filedialog.askdirectory(title="Seleziona cartella con i video")
+        if cartella:
+            self.entry_cartella_video.configure(state="normal")
+            self.entry_cartella_video.delete(0, "end")
+            self.entry_cartella_video.insert(0, cartella)
+            self.entry_cartella_video.configure(state="readonly")
+            self._cartella_video_batch = cartella
+
     # ===================================================================
-    # Elaborazione video
+    # Elaborazione video (singolo)
     # ===================================================================
     def _validate_file_size(self):
         try:
@@ -1148,19 +1591,16 @@ class App(ctk.CTk):
         self.video_size_mb = get_file_size_mb(video_path)
         self._set_in_esecuzione(True)
 
-        # --- Apri file di log per questa sessione ---
-        operazione = "elabora_e_trascrivi" if auto_trascrivi else "elabora_video"
-        nome_video = os.path.basename(video_path)
-        log_path = self._apri_log_file(operazione, contesto=nome_video)
+        # Apri log file
+        etichetta = "elaborazione_trascrizione" if auto_trascrivi else "elaborazione_video"
+        self._apri_log_file(etichetta)
 
         modalita = "ELABORAZIONE + TRASCRIZIONE" if auto_trascrivi else "ELABORAZIONE VIDEO"
         self._log(f"\n{'━'*50}")
         self._log(f"🎬  {modalita}")
         self._log(f"{'━'*50}")
-        self._log(f"   File: {nome_video}")
+        self._log(f"   File: {os.path.basename(video_path)}")
         self._log(f"   Dimensione: {self.video_size_mb:.1f} MB")
-        if log_path:
-            self._log(f"   📝 Log: {log_path}")
         if auto_trascrivi:
             self._log(f"   Modalita': one-click (split → trascrivi)\n")
         else:
@@ -1172,138 +1612,81 @@ class App(ctk.CTk):
         device = self.device_var.get()
 
         def lavoro():
-            motivo_chiusura = "completato"
             try:
-                from moviepy.video.io.VideoFileClip import VideoFileClip
-
-                t_split_start = time.time()
-                self._set_status("Caricamento video...")
-                self._log("⏳ Caricamento video...")
-
-                video = VideoFileClip(video_path)
-                if video.audio is None:
-                    self.after(0, lambda: messagebox.showerror(
-                        "Errore", "Il video non contiene audio."))
-                    video.close()
-                    motivo_chiusura = "errore: video senza audio"
-                    return
-
-                self._set_status("Estrazione audio...")
-                self._log("⏳ Estrazione audio...")
-
-                audio = video.audio
+                self._set_status("Estrazione e segmentazione...")
                 base_name = os.path.splitext(os.path.basename(video_path))[0]
-                output_base_dir = os.path.dirname(video_path)
+                output_dir = os.path.join(os.path.dirname(video_path), base_name)
 
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                    temp_audio_path = tmp.name
-
-                try:
-                    import contextlib, io
-                    f = io.StringIO()
-                    with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
-                        audio.write_audiofile(temp_audio_path, codec='pcm_s16le')
-                except Exception:
-                    audio.write_audiofile(temp_audio_path)
-
-                if self.stop_event.is_set():
-                    audio.close()
-                    video.close()
-                    try:
-                        os.unlink(temp_audio_path)
-                    except:
-                        pass
-                    self._log("⏹  Interrotto dopo estrazione audio")
-                    motivo_chiusura = "interrotto dall'utente"
-                    return
-
-                self._set_status("Segmentazione audio...")
-                self._log("⏳ Segmentazione audio...\n")
-
-                output_dir = os.path.join(output_base_dir, base_name)
-                os.makedirs(output_dir, exist_ok=True)
-
-                segments, seg_dur_min = split_audio_with_ffmpeg(
-                    temp_audio_path, output_dir, target_size_mb, base_name,
+                segments, seg_dur_min, t_split = estrai_e_splitta_video(
+                    video_path, output_dir, target_size_mb,
                     callback=self._log, stop_event=self.stop_event)
-
-                audio.close()
-                video.close()
-                try:
-                    os.unlink(temp_audio_path)
-                except:
-                    pass
-
-                self.tempo_splitting = time.time() - t_split_start
+                self.tempo_splitting = t_split
 
                 if self.stop_event.is_set() and not segments:
                     self._set_status("Interrotto")
-                    motivo_chiusura = "interrotto dall'utente"
                     return
 
-                if segments:
-                    self.cartella_segmenti = output_dir
-                    self._log(f"\n{'─'*50}")
-                    self._log(f"📊  REPORT SPLITTING")
-                    self._log(f"{'─'*50}")
-                    self._log(f"   Segmenti creati:   {len(segments)}")
-                    self._log(f"   Durata media:      ~{seg_dur_min:.1f} min/segmento")
-                    self._log(f"   Tempo splitting:   {formatta_tempo(self.tempo_splitting)}")
-                    self._log(f"   Cartella:          {output_dir}")
-
-                    if auto_trascrivi and not self.stop_event.is_set():
-                        self._log(f"\n{'━'*50}")
-                        self._log(f"🎙  TRASCRIZIONE AUTOMATICA")
-                        self._log(f"{'━'*50}")
-                        self._log(f"   Cartella: {output_dir}\n")
-                        self._set_status("Trascrizione in corso...")
-
-                        percorso_out, tempo_trasc = trascrivi_segmenti(
-                            cartella=output_dir, modello_nome=modello,
-                            lingua=lingua, device=device, formato=formato,
-                            callback=self._log,
-                            stop_event=self.stop_event,
-                            pause_event=self.pause_event)
-
-                        self.tempo_trascrizione = tempo_trasc
-
-                        if percorso_out:
-                            self._set_status("Elaborazione + Trascrizione completata!")
-                            self._stampa_report_e2e()
-                            self._log("\n🟢 App pronta — puoi consultare i log o avviare un'altra trascrizione.")
-                            self.after(0, lambda: messagebox.showinfo("Completato",
-                                f"Processo end-to-end completato!\n\n"
-                                f"Segmenti: {len(segments)}\n"
-                                f"Trascrizione: {percorso_out}\n"
-                                f"Tempo totale: {formatta_tempo(self.tempo_splitting + self.tempo_trascrizione)}"))
-                        else:
-                            if self.stop_event.is_set():
-                                self._set_status("Interrotto — progresso e file parziale salvati")
-                                motivo_chiusura = "interrotto dall'utente (trascrizione)"
-                            else:
-                                self._set_status("Splitting OK, nessun file trascritto")
-                                motivo_chiusura = "nessun file trascritto"
-                    elif self.stop_event.is_set():
-                        self._set_status("Interrotto dopo splitting")
-                        self._log(f"\n✅ Splitting completato. Trascrizione non avviata (interrotto).")
-                        self._log(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
-                        motivo_chiusura = "interrotto dall'utente (dopo splitting)"
-                    else:
-                        self._set_status("Splitting completato!")
-                        self._log(f"\n✅ Puoi ora cliccare 'Trascrivi Segmenti'")
-                        self.after(0, lambda: messagebox.showinfo("Successo",
-                            f"{len(segments)} segmenti creati\n"
-                            f"Tempo: {formatta_tempo(self.tempo_splitting)}\n"
-                            f"Percorso: {output_dir}"))
-                else:
+                if not segments:
                     self._set_status("Errore splitting")
-                    motivo_chiusura = "errore splitting (nessun segmento)"
                     self.after(0, lambda: messagebox.showerror("Errore",
                         "Nessun segmento creato."))
+                    return
+
+                self.cartella_segmenti = output_dir
+                self._log(f"\n{'─'*50}")
+                self._log(f"📊  REPORT SPLITTING")
+                self._log(f"{'─'*50}")
+                self._log(f"   Segmenti creati:   {len(segments)}")
+                self._log(f"   Durata media:      ~{seg_dur_min:.1f} min/segmento")
+                self._log(f"   Tempo splitting:   {formatta_tempo(self.tempo_splitting)}")
+                self._log(f"   Cartella:          {output_dir}")
+
+                if auto_trascrivi and not self.stop_event.is_set():
+                    self._log(f"\n{'━'*50}")
+                    self._log(f"🎙  TRASCRIZIONE AUTOMATICA")
+                    self._log(f"{'━'*50}")
+                    self._log(f"   Cartella: {output_dir}\n")
+                    self._set_status("Trascrizione in corso...")
+
+                    percorso_out, tempo_trasc = trascrivi_segmenti(
+                        cartella=output_dir, modello_nome=modello,
+                        lingua=lingua, device=device, formato=formato,
+                        callback=self._log,
+                        stop_event=self.stop_event,
+                        pause_event=self.pause_event,
+                        video_size_mb=self.video_size_mb,
+                        tempo_splitting=self.tempo_splitting)
+
+                    self.tempo_trascrizione = tempo_trasc
+
+                    if percorso_out:
+                        self._set_status("Elaborazione + Trascrizione completata!")
+                        self._stampa_report_e2e()
+                        self._log("\n🟢 App pronta — puoi consultare i log o avviare un'altra trascrizione.")
+                        self.after(0, lambda: messagebox.showinfo("Completato",
+                            f"Processo end-to-end completato!\n\n"
+                            f"Segmenti: {len(segments)}\n"
+                            f"Trascrizione: {percorso_out}\n"
+                            f"Tempo totale: {formatta_tempo(self.tempo_splitting + self.tempo_trascrizione)}"))
+                    else:
+                        if self.stop_event.is_set():
+                            self._set_status("Interrotto — progresso e file parziale salvati")
+                        else:
+                            self._set_status("Splitting OK, nessun file trascritto")
+                elif self.stop_event.is_set():
+                    self._set_status("Interrotto dopo splitting")
+                    self._log(f"\n✅ Splitting completato. Trascrizione non avviata (interrotto).")
+                    self._log(f"   Riprendi con 'Trascrivi Segmenti' o 'Trascrivi da Cartella'")
+                else:
+                    self._set_status("Splitting completato!")
+                    self._log(f"\n✅ Puoi ora cliccare 'Trascrivi Segmenti'")
+                    self.after(0, lambda: messagebox.showinfo("Successo",
+                        f"{len(segments)} segmenti creati\n"
+                        f"Tempo: {formatta_tempo(self.tempo_splitting)}\n"
+                        f"Percorso: {output_dir}"))
             except ImportError as e:
                 self._set_status("Errore trascrizione")
                 self._log(f"\n✗ ERRORE: {e}")
-                motivo_chiusura = f"errore: {e}"
                 self.after(0, lambda: messagebox.showerror("Errore", str(e)))
             except Exception as e:
                 self._set_status("Errore")
@@ -1311,16 +1694,15 @@ class App(ctk.CTk):
                 if "'NoneType'" in err:
                     err = "FFmpeg non trovato o non configurato."
                 self._log(f"✗ ERRORE: {err}")
-                motivo_chiusura = f"errore: {err}"
                 self.after(0, lambda: messagebox.showerror("Errore", err))
             finally:
+                self._chiudi_log_file()
                 self._set_in_esecuzione(False)
-                self._chiudi_log_file(motivo=motivo_chiusura)
 
         threading.Thread(target=lavoro, daemon=True).start()
 
     # ===================================================================
-    # Trascrizione
+    # Trascrizione (segmenti / cartella audio)
     # ===================================================================
     def _get_lingua(self):
         sel = self.lingua_var.get()
@@ -1338,8 +1720,7 @@ class App(ctk.CTk):
                 "Nessuna cartella disponibile.\n"
                 "Elabora prima un video o usa 'Trascrivi da Cartella...'.")
             return
-        self._esegui_trascrizione(self.cartella_segmenti,
-                                  operazione="trascrivi_segmenti")
+        self._esegui_trascrizione(self.cartella_segmenti)
 
     def _trascrivi_da_cartella(self):
         if self.in_esecuzione:
@@ -1347,23 +1728,17 @@ class App(ctk.CTk):
         cartella = filedialog.askdirectory(title="Seleziona cartella con file audio")
         if cartella:
             self.cartella_segmenti = cartella
-            self._esegui_trascrizione(cartella,
-                                      operazione="trascrivi_da_cartella")
+            self._esegui_trascrizione(cartella)
 
-    def _esegui_trascrizione(self, cartella, operazione="trascrivi_segmenti"):
+    def _esegui_trascrizione(self, cartella):
         self._set_in_esecuzione(True)
-
-        # --- Apri file di log per questa sessione ---
-        nome_cartella = os.path.basename(os.path.normpath(cartella))
-        log_path = self._apri_log_file(operazione, contesto=nome_cartella)
-
+        # Apri log file (solo se non già aperto da _avvia_elaborazione_video)
+        if not getattr(self, "_log_file", None):
+            self._apri_log_file("trascrizione")
         self._log(f"\n{'━'*50}")
         self._log(f"🎙  TRASCRIZIONE")
         self._log(f"{'━'*50}")
-        self._log(f"   Cartella: {cartella}")
-        if log_path:
-            self._log(f"   📝 Log: {log_path}")
-        self._log("")
+        self._log(f"   Cartella: {cartella}\n")
         self._set_status("Trascrizione in corso...")
 
         lingua = self._get_lingua()
@@ -1372,7 +1747,6 @@ class App(ctk.CTk):
         device = self.device_var.get()
 
         def lavoro():
-            motivo_chiusura = "completato"
             try:
                 percorso_out, tempo_trasc = trascrivi_segmenti(
                     cartella=cartella, modello_nome=modello,
@@ -1393,18 +1767,122 @@ class App(ctk.CTk):
                 else:
                     if self.stop_event.is_set():
                         self._set_status("Interrotto — progresso e file parziale salvati")
-                        motivo_chiusura = "interrotto dall'utente"
                     else:
                         self._set_status("Nessun file trascritto")
-                        motivo_chiusura = "nessun file trascritto"
             except Exception as e:
                 self._set_status("Errore trascrizione")
                 self._log(f"\n✗ ERRORE: {e}")
-                motivo_chiusura = f"errore: {e}"
                 self.after(0, lambda: messagebox.showerror("Errore", str(e)))
             finally:
+                self._chiudi_log_file()
                 self._set_in_esecuzione(False)
-                self._chiudi_log_file(motivo=motivo_chiusura)
+
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    # ===================================================================
+    # Batch cartella → LLM Wiki
+    # ===================================================================
+    def _elabora_cartella_batch(self):
+        if self.in_esecuzione:
+            return
+        if not WHISPER_DISPONIBILE:
+            messagebox.showerror("Errore",
+                "faster-whisper non installato.\n"
+                "Installa con: pip install faster-whisper")
+            return
+        if not setup_moviepy():
+            messagebox.showerror("Errore",
+                "FFmpeg non trovato.\n1. Installa FFmpeg nel PATH\n"
+                "2. Oppure metti ffmpeg.exe nella cartella dell'eseguibile")
+            return
+
+        cartella = getattr(self, "_cartella_video_batch", None)
+        if not cartella or not os.path.isdir(cartella):
+            messagebox.showerror("Errore", "Seleziona una cartella valida con i video.")
+            return
+
+        video = trova_file_video(cartella)
+        if not video:
+            messagebox.showwarning("Attenzione",
+                "Nessun file video trovato nella cartella selezionata.")
+            return
+
+        target_size_mb = self._validate_file_size()
+        if target_size_mb is None:
+            return
+
+        genera_wiki = bool(self.wiki_var.get())
+        lingua = self._get_lingua()
+        modello = self.modello_var.get()
+        formato = self.formato_var.get()
+        device = self.device_var.get()
+
+        # Reset metriche E2E (non significative in batch multi-video)
+        self.tempo_splitting = 0.0
+        self.video_size_mb = 0.0
+
+        self._set_in_esecuzione(True)
+        self._apri_log_file("batch_wiki")
+        self._log(f"\n{'━'*50}")
+        self._log(f"🚀  BATCH CARTELLA → LLM WIKI")
+        self._log(f"{'━'*50}")
+        self._log(f"   Video da processare: {len(video)}")
+        self._log(f"   Genera Wiki:         {'sì' if genera_wiki else 'no'}\n")
+        self._set_status("Batch in corso...")
+
+        def lavoro():
+            try:
+                risultato = elabora_cartella_video(
+                    cartella_video=cartella, target_size_mb=target_size_mb,
+                    modello=modello, lingua=lingua, device=device,
+                    formato=formato, genera_wiki=genera_wiki,
+                    callback=self._log,
+                    stop_event=self.stop_event, pause_event=self.pause_event)
+
+                if not risultato:
+                    self._set_status("Nessun video elaborato")
+                    return
+
+                cp = risultato["cartella_progetto"]
+                self._log(f"\n{'━'*50}")
+                self._log(f"📋  REPORT BATCH")
+                self._log(f"{'━'*50}")
+                self._log(f"   Video totali:        {risultato['n_video']}")
+                self._log(f"   Completati (tot):    {risultato['n_completati']}")
+                self._log(f"   Nuovi in questo run: {risultato['n_nuovi']}")
+                self._log(f"   Tempo batch:         {formatta_tempo(risultato['tempo'])}")
+                self._log(f"   Progetto:            {cp}")
+                self._log(f"{'━'*50}")
+
+                if risultato["interrotto"]:
+                    self._set_status("Batch interrotto — progresso salvato")
+                    self._log("\n⏹  Interrotto. Riavvia il batch sulla stessa cartella per riprendere.")
+                elif risultato["wiki_pronta"]:
+                    self._set_status("Batch + Wiki completati!")
+                    self._log(f"\n📚 LLM Wiki pronta.")
+                    self._log(f"   1) Apri '{os.path.basename(cp)}' come vault in Obsidian")
+                    self._log(f"   2) Apri un agente (es. Claude Code) nella stessa cartella")
+                    self._log(f"   3) Chiedi: \"Leggi CLAUDE.md e fai l'ingest delle sorgenti in raw/\"")
+                    self._log("\n🟢 App pronta.")
+                    self.after(0, lambda: messagebox.showinfo("Completato",
+                        f"Batch completato!\n\n"
+                        f"Video completati: {risultato['n_completati']}/{risultato['n_video']}\n"
+                        f"Progetto Wiki:\n{cp}\n\n"
+                        f"Apri la cartella in Obsidian e usa un agente LLM "
+                        f"(vedi CLAUDE.md) per costruire la wiki."))
+                else:
+                    self._set_status("Batch completato (senza Wiki)")
+                    self.after(0, lambda: messagebox.showinfo("Completato",
+                        f"Batch completato!\n\n"
+                        f"Video completati: {risultato['n_completati']}/{risultato['n_video']}\n"
+                        f"Trascrizioni nelle sottocartelle di:\n{cp}"))
+            except Exception as e:
+                self._set_status("Errore batch")
+                self._log(f"\n✗ ERRORE BATCH: {e}")
+                self.after(0, lambda: messagebox.showerror("Errore", str(e)))
+            finally:
+                self._chiudi_log_file()
+                self._set_in_esecuzione(False)
 
         threading.Thread(target=lavoro, daemon=True).start()
 
