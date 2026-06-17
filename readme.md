@@ -16,7 +16,7 @@ Ho creato un processo **interamente in locale**, open source, che estrae e trasc
 
 Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua. Funziona su **CPU** o **GPU NVIDIA** (con accelerazione CUDA), con fallback automatico su CPU se CUDA non è disponibile.
 
-In più, può elaborare **un'intera cartella di video in batch** e generare lo scaffold di una **LLM Wiki** — una base di conoscenza in markdown, pronta per Obsidian, che un coding agent (es. Claude Code) può poi popolare e mantenere.
+In più, può elaborare **un'intera cartella di video in batch** e generare lo scaffold di una **LLM Wiki** — una base di conoscenza in markdown, pronta per Obsidian, che un coding agent (es. Claude Code) può poi popolare e mantenere. Per governance del dato, utilizzare coding agent sotto licenze aziendali, altrimenti preferire soluzioni interamente locali se si ha un hardware opportuno.
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
