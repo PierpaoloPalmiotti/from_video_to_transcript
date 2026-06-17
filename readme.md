@@ -16,6 +16,8 @@ Ho creato un processo **interamente in locale**, open source, che estrae e trasc
 
 Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, lo **segmenta** in parti di dimensione configurabile e lo **trascrive automaticamente** usando modelli Whisper. Supporta **italiano** e **inglese** con rilevamento automatico della lingua. Funziona su **CPU** o **GPU NVIDIA** (con accelerazione CUDA), con fallback automatico su CPU se CUDA non è disponibile.
 
+In più, può elaborare **un'intera cartella di video in batch** e generare lo scaffold di una **LLM Wiki** — una base di conoscenza in markdown, pronta per Obsidian, che un coding agent (es. Claude Code) può poi popolare e mantenere.
+
 ![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
@@ -30,6 +32,7 @@ Un'applicazione desktop con interfaccia grafica moderna che **estrae l'audio**, 
 - **Accelerazione GPU NVIDIA** opzionale: rilevamento automatico delle DLL CUDA installate via pip (cuBLAS, cuDNN); selezione `cuda`, `cpu` o `auto` direttamente dalla GUI
 - **Fallback automatico CUDA → CPU** se la GPU non è disponibile o le librerie CUDA non sono caricabili — l'app non si blocca, segnala l'errore nel log e prosegue su CPU
 - **Pipeline one-click**: un unico pulsante esegue splitting + trascrizione in sequenza senza intervento manuale
+- **Batch cartella → LLM Wiki**: elabora in sequenza tutti i video di una cartella e genera una struttura "LLM Wiki" pronta per Obsidian (sorgenti immutabili in `raw/`, schema agente `CLAUDE.md`/`AGENTS.md`), da far popolare a un coding agent come Claude Code. Il modello Whisper viene caricato una sola volta e riusato per tutti i video; il batch è ripartibile se interrotto
 - **Cleanup deterministico delle risorse GPU** a fine trascrizione (svuotamento esplicito della cache CUDA): l'app resta aperta dopo il completamento e ti permette di consultare con calma le metriche finali
 - **Pulizia automatica**: i file audio segmentati vengono eliminati al termine della trascrizione completata con successo
 - **Checkpoint/resume**: il progresso viene salvato in `_progresso.json` dopo ogni segmento — se il processo viene interrotto, alla ripresa parte dal punto in cui si era fermato
@@ -121,8 +124,8 @@ Se non è installato:
 
 ```bash
 # 1. Clona il repository
-git clone https://github.com/PierpaoloPalmiotti/from_video_to_transcript.git
-cd from_video_to_transcript
+git clone https://github.com/PierpaoloPalmiotti/from_video_to_wiki.git
+cd from_video_to_wiki
 
 # 2. Crea un virtual environment (consigliato)
 python -m venv venv
@@ -139,7 +142,7 @@ pip install -r requirements.txt
 
 ### Installazione opzionale per GPU NVIDIA
 
-Se hai una GPU NVIDIA e vuoi sfruttare l'accelerazione CUDA (5-8x più veloce della CPU su modelli grandi), installa anche le librerie cuBLAS e cuDNN. Sono pacchetti pesanti (~700 MB), quindi alza il timeout di pip:
+Se hai una GPU NVIDIA e vuoi sfruttare l'accelerazione CUDA (drasticamente più veloce della CPU), installa anche le librerie cuBLAS e cuDNN. Sono pacchetti pesanti (~700 MB), quindi alza il timeout di pip:
 
 ```bash
 pip install --timeout 300 -r requirements-gpu.txt
@@ -178,13 +181,13 @@ huggingface-cli download Systran/faster-whisper-medium
 ## 📂 Struttura del progetto
 
 ```
-from_video_to_transcript/
+from_video_to_wiki/
 │
 ├── main.py                  # Applicazione GUI (CustomTkinter)
 ├── transcriber.py           # Modulo CLI standalone per trascrizione
 ├── requirements.txt         # Dipendenze base (CPU)
 ├── requirements-gpu.txt     # Dipendenze opzionali per GPU NVIDIA
-├── README.md                # Documentazione
+├── readme.md                # Documentazione
 ├── LICENSE                  # Licenza MIT
 ├── .gitignore               # File e cartelle esclusi da Git
 │
@@ -199,7 +202,7 @@ from_video_to_transcript/
 
 ### Output generato a runtime
 
-Quando elabori un video, l'applicazione crea una cartella dedicata accanto al file sorgente:
+Quando elabori un singolo video, l'applicazione crea una cartella dedicata accanto al file sorgente:
 
 ```
 cartella_video/
@@ -281,6 +284,54 @@ python transcriber.py /percorso/cartella_audio/ --output risultato.txt
 
 ---
 
+## 🧠 Batch & LLM Wiki
+
+Oltre al singolo video, l'app può elaborare **un'intera cartella** e produrre lo scaffold di una **LLM Wiki** — una base di conoscenza in markdown che un coding agent (Claude Code, OpenCode, ecc.) può poi popolare e mantenere, navigabile in [Obsidian](https://obsidian.md/).
+
+L'idea segue il pattern [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): l'app fa ciò in cui eccelle (trascrivere in batch) e prepara il terreno; la wiki vera la costruisce l'agente. **Nessuna chiamata LLM è inclusa nell'app**: l'integrazione è gestita esternamente, così lo strumento resta 100% offline e senza costi ricorrenti.
+
+### Come si usa
+
+1. Nella sezione **3 │ Batch Cartella → LLM Wiki** clicca **📁 Sfoglia** e seleziona la cartella che contiene i video
+2. Lascia attiva la spunta **Genera struttura LLM Wiki** (impostazioni modello/lingua/formato/device condivise con la modalità a singolo video)
+3. Clicca **🚀 Elabora Cartella + Wiki**
+
+L'app elabora in sequenza tutti i video riconosciuti (MP4, AVI, MOV, MKV, ecc.): per ciascuno estrae l'audio, segmenta e trascrive. Il modello Whisper viene **caricato una sola volta** e riusato per tutti i file. Il progresso è salvato a livello di cartella, quindi un batch interrotto **riparte** dai video non ancora completati.
+
+### Struttura generata
+
+Accanto ai video viene creata una cartella di progetto:
+
+```
+_Wiki_<nome_cartella>/
+│
+├── raw/                    # Trascrizioni: una per video (.md, con frontmatter YAML)
+│   ├── 01_Riunione_Q2.md   #   → FONTI IMMUTABILI: l'agente le legge, non le modifica
+│   └── 02_Training_OBS.md
+│
+├── wiki/                   # Pagine generate dall'agente
+│   ├── index.md            #   → catalogo delle pagine
+│   └── log.md              #   → registro cronologico (append-only)
+│
+├── _segmenti/              # Cartelle di lavoro temporanee (ignorabili/eliminabili)
+│
+├── CLAUDE.md               # Schema/istruzioni per l'agente (Claude Code)
+├── AGENTS.md               # Stesso schema (Codex, OpenCode, Aider, ...)
+└── README_WIKI.md          # Guida rapida al workflow
+```
+
+> 💡 Le trascrizioni vengono scritte in `raw/` come `.md` solo se la spunta **Genera struttura LLM Wiki** è attiva. `CLAUDE.md` e `AGENTS.md` hanno contenuto identico: cambia solo quale agente li legge automaticamente.
+
+### Workflow con un coding agent
+
+1. Apri la cartella `_Wiki_<nome>/` come **vault in Obsidian**
+2. Punta il tuo coding agent (es. Claude Code) alla **stessa cartella** — leggerà da sé `CLAUDE.md` / `AGENTS.md`
+3. Chiedigli di **ingerire le fonti** in `raw/`: l'agente costruisce pagine, riferimenti incrociati e sintesi, navigabili in tempo reale nel grafo di Obsidian
+
+> 🔒 **Vuoi restare interamente offline anche per l'agente?** Usa un modello locale via [Ollama](https://ollama.com/) con un agente che supporta `AGENTS.md` (OpenCode, Aider). Scegli un modello con supporto al *tool use* (es. Qwen 2.5 Coder / Qwen3) e alza la finestra di contesto (`num_ctx`) per la manutenzione multi-file della wiki.
+
+---
+
 ## 📁 Struttura output
 
 Ogni video genera una cartella dedicata con il proprio nome:
@@ -299,13 +350,16 @@ cartella_video/
 
 ## ⚡ Performance reali e proiezioni
 
-### Benchmark misurato
+### Benchmark misurati
 
-Dai test effettuati con `large-v3-turbo` in quantizzazione `int8` su CPU, il tempo end-to-end (splitting + trascrizione) è di circa:
+Due dati misurati **end-to-end** (caricamento modello + estrazione audio + segmentazione + trascrizione + generazione file) con `large-v3-turbo`:
 
-> **~20 sec/MB** di video sorgente
+- **CPU (int8)**: circa **20 sec/MB** di video sorgente
+- **GPU NVIDIA RTX 4060 (float16)**: circa **0.09 sec/MB** — ovvero **~1.5 minuti per GB** di video
 
-Questo valore include il caricamento del modello, l'estrazione audio, la segmentazione e la trascrizione completa.
+Sulla GPU il fattore di velocità rispetto alla CPU supera le **~200x** grazie al batching del modello turbo. La stessa cartella di video che la CPU macina in una notte, la GPU la chiude in pochi minuti.
+
+> ⚠️ **Nota sull'unità di misura**: `sec/MB` dipende dal bitrate del video — un GB di registrazione ad alta risoluzione contiene meno minuti di audio (e quindi si trascrive più in fretta "per MB") di un GB a basso bitrate. I valori sopra sono indicativi e variano in base a CPU/GPU, RAM e contenuto.
 
 ### Rapporti di velocità stimati per modello (CPU, int8)
 
@@ -317,7 +371,7 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 | `large-v3-turbo` | **~20** | **baseline (misurato)** |
 | `large-v3` | ~50 | ~2.5x più lento |
 
-### Proiezioni tempi E2E per dimensione video e modello
+### Proiezioni tempi E2E per dimensione video e modello (CPU)
 
 | Dimensione video | `tiny` (~3 s/MB) | `small` (~7 s/MB) | `medium` (~14 s/MB) | `large-v3-turbo` (~20 s/MB) ⭐ | `large-v3` (~50 s/MB) |
 |---|---|---|---|---|---|
@@ -329,11 +383,11 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 | **2 GB** | ~1h 42min | ~3h 59min | ~7h 57min | **~11h 22min** | ~28h 26min |
 | **5 GB** | ~4h 16min | ~9h 58min | ~19h 53min | **~28h 24min** | ~71h (≈3 giorni) |
 
-> ⭐ La colonna `large-v3-turbo` è basata su benchmark reali. Le altre sono **proiezioni stimate** in base ai rapporti di velocità tipici tra modelli su CPU int8. I tempi effettivi possono variare in base a CPU, RAM e complessità dell'audio.
+> ⭐ La colonna `large-v3-turbo` su CPU è basata su benchmark reali. Le altre sono **proiezioni stimate** in base ai rapporti di velocità tipici tra modelli su CPU int8.
 
 > ⚠️ **Nota qualità**: `tiny` e `small` sono molto più veloci ma la qualità in italiano degrada significativamente. `medium` è un buon compromesso se la RAM è limitata. `large-v3` offre qualità identica al turbo ma impiega 2.5x più tempo — **il turbo resta la scelta migliore** in quasi tutti gli scenari.
 
-> 💡 **Consiglio**: per video superiori a 500 MB con `large-v3-turbo` o `large-v3`, una GPU dedicata (o un Mac con chip Pro/Max) fa una differenza enorme. Con una **GPU NVIDIA** (RTX 3060+) i tempi di trascrizione si riducono di **5-8x**. Se lavori solo su CPU, puoi lanciare la trascrizione di notte su file grandi.
+> 💡 **Consiglio**: per video grandi su CPU, lancia la trascrizione di notte. Con una **GPU NVIDIA** la differenza è enorme (vedi benchmark misurato sopra). Se lavori solo su CPU, il batch notturno resta la strategia migliore.
 
 ### Confronto CPU vs GPU vs Apple Silicon
 
@@ -341,13 +395,12 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 |---|---|---|---|
 | CPU (i7/Ryzen 7, int8) | ~20 | ~1h 7min | ~5h 41min |
 | CPU (i9/Ryzen 9, int8) | ~14 | ~47 min | ~4h |
-| MacBook Air M2/M3 (int8) | ~16 | ~53 min | ~4h 33min |
-| MacBook Pro M2 Pro/M3 Pro (int8) | ~12 | ~40 min | ~3h 25min |
-| MacBook Pro M3 Max/M4 Pro (int8) | ~9 | ~30 min | ~2h 34min |
-| GPU (RTX 3060, float16) | ~4 | ~13 min | ~1h 8min |
-| GPU (RTX 4090, float16) | ~2 | ~7 min | ~34 min |
+| MacBook Pro M3 Pro (int8) | ~12 | ~40 min | ~3h 25min |
+| **GPU (RTX 4060, float16 — misurato)** | **~0.09** | **~18 sec** | **~1.5 min** |
 
-> 💡 **Nota su macOS**: faster-whisper su Apple Silicon gira su CPU (non sfrutta Metal/GPU nativamente), ma le performance dei chip M-series sono eccellenti grazie alla bandwidth di memoria unificata e all'efficienza dei core. Un MacBook Pro M3 Pro si colloca a metà tra un i9 desktop e una RTX 3060. Per sfruttare appieno la GPU Apple, valuta alternative come [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) che supportano l'accelerazione Metal nativa.
+> ⭐ La riga **RTX 4060** è un **benchmark reale end-to-end** con `large-v3-turbo`. GPU di fascia superiore (4070/4090) sono attese ancora più rapide. Le righe CPU/Apple sono indicative.
+
+> 💡 **Nota su macOS**: faster-whisper su Apple Silicon gira su CPU (non sfrutta Metal/GPU nativamente), ma le performance dei chip M-series sono eccellenti grazie alla bandwidth di memoria unificata. Per sfruttare appieno la GPU Apple, valuta alternative come [MLX Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) che supportano l'accelerazione Metal nativa.
 
 ---
 
@@ -380,6 +433,7 @@ Questo valore include il caricamento del modello, l'estrazione audio, la segment
 | L'app si chiudeva dopo la trascrizione GPU | Risolto: ora c'è un cleanup deterministico della cache CUDA prima del messagebox finale, l'app resta aperta. |
 | Allucinazioni nel testo | Il filtro VAD è attivo di default. Se persistono, prova `--lingua it` per forzare la lingua |
 | La trascrizione non riprende dal punto giusto | Verifica che `_progresso.json` sia presente nella cartella dei segmenti. Se corrotto, eliminalo per ripartire da zero |
+| Il batch non rigenera i `.md` in `raw/` | Assicurati che la spunta **Genera struttura LLM Wiki** sia attiva prima di avviare il batch |
 
 ---
 
