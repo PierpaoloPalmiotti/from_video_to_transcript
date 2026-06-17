@@ -1,6 +1,6 @@
 ![Audio Splitter & Transcriber](from_video_to_wiki.png)
 
-# 🎬 From Video to Text - on your PC
+# 🎬 From Video to Wiki - on local
 
 ## Il problema
 
